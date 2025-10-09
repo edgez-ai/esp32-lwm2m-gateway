@@ -34,6 +34,8 @@
 #include "sdkconfig.h"
 
 #include "freertos/semphr.h"
+#include "pb_decode.h"
+#include "lwm2m.pb.h"
 
 
 #define FUNC_SEND_WAIT_SEM(func, sem) do {\
@@ -70,6 +72,112 @@ static esp_ble_gap_periodic_adv_sync_params_t periodic_adv_sync_params = {
 
 bool periodic_sync = false;
 
+/* ---- BLE Advertising helpers (standard AD TLV parser) ---- */
+static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
+                             uint8_t *type, const uint8_t **value, size_t *value_len)
+{
+    /* Iterate Advertising Data: [Len][Type][Value..] ... */
+    if (!data || !offset || *offset >= len) return false;
+    size_t i = *offset;
+    uint8_t l = data[i];
+    if (l == 0) { *offset = len; return false; }
+    if (i + 1 + l > len) { *offset = len; return false; }
+    uint8_t t = data[i + 1];
+    *type = t;
+    *value = &data[i + 2];
+    *value_len = (l >= 1) ? (size_t)(l - 1) : 0; /* exclude Type byte */
+    *offset = i + 1 + l; /* move to next element */
+    return true;
+}
+
+static bool extract_msd_payload(const uint8_t *adv_data, size_t adv_len,
+                                const uint8_t **payload, size_t *payload_len,
+                                uint16_t *company_id_out)
+{
+    /* Manufacturer Specific Data (type 0xFF): value = [CompanyID_L][CompanyID_H][payload...] */
+    size_t off = 0; uint8_t type; const uint8_t *val; size_t val_len;
+    while (adv_next_element(adv_data, adv_len, &off, &type, &val, &val_len)) {
+        if (type == 0xFF && val_len >= 2) {
+            uint16_t cid = (uint16_t)val[0] | ((uint16_t)val[1] << 8); /* little-endian per spec */
+            if (company_id_out) *company_id_out = cid;
+            if (payload && payload_len) {
+                *payload = (val_len > 2) ? (val + 2) : NULL; /* skip 2-byte company id */
+                *payload_len = (val_len > 2) ? (val_len - 2) : 0;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool extract_service_data_payload(const uint8_t *adv_data, size_t adv_len,
+                                         const uint8_t **payload, size_t *payload_len,
+                                         uint16_t *uuid16_out)
+{
+    /* Service Data - 16-bit UUID (type 0x16): value = [UUID16_L][UUID16_H][payload...] */
+    size_t off = 0; uint8_t type; const uint8_t *val; size_t val_len;
+    while (adv_next_element(adv_data, adv_len, &off, &type, &val, &val_len)) {
+        if (type == 0x16 && val_len >= 2) {
+            uint16_t uuid16 = (uint16_t)val[0] | ((uint16_t)val[1] << 8);
+            if (uuid16_out) *uuid16_out = uuid16;
+            if (payload && payload_len) {
+                *payload = (val_len > 2) ? (val + 2) : NULL;
+                *payload_len = (val_len > 2) ? (val_len - 2) : 0;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool decode_lwm2m_appearance(const uint8_t *data, size_t data_len, lwm2m_LwM2MAppearance *appearance)
+{
+    pb_istream_t stream = pb_istream_from_buffer(data, data_len);
+    bool status = pb_decode(&stream, lwm2m_LwM2MAppearance_fields, appearance);
+    
+    if (!status) {
+        ESP_LOGE(LOG_TAG, "Failed to decode protobuf appearance: %s", PB_GET_ERROR(&stream));
+        return false;
+    }
+    
+    return true;
+}
+
+static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM2MMessage *message)
+{
+    pb_istream_t stream = pb_istream_from_buffer(data, data_len);
+    bool status = pb_decode(&stream, lwm2m_LwM2MMessage_fields, message);
+    
+    if (!status) {
+        ESP_LOGE(LOG_TAG, "Failed to decode protobuf message: %s", PB_GET_ERROR(&stream));
+        return false;
+    }
+    
+    return true;
+}
+
+static void process_lwm2m_appearance(const lwm2m_LwM2MAppearance *appearance)
+{
+    ESP_LOGI(LOG_TAG, "Device appearance - model: %d, serial: %u", 
+             appearance->model, 
+             appearance->serial);
+}
+
+static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
+{
+    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - timestamp: %llu", message->timestamp);
+    
+    switch (message->which_body) {
+        case lwm2m_LwM2MMessage_appearance_tag:
+            ESP_LOGI(LOG_TAG, "Device appearance - model: %d, serial: %u", 
+                     message->body.appearance.model, 
+                     message->body.appearance.serial);
+            break;
+        default:
+            ESP_LOGW(LOG_TAG, "Unknown message type: %d", message->which_body);
+            break;
+    }
+}
 
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
@@ -128,10 +236,70 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
         break;
     case ESP_GAP_BLE_PERIODIC_ADV_REPORT_EVT:
-        ESP_LOGI(LOG_TAG, "Periodic adv report, sync handle %d, data status %d, data len %d, rssi %d", param->period_adv_report.params.sync_handle,
-                                                                                                    param->period_adv_report.params.data_status,
-                                                                                                    param->period_adv_report.params.data_length,
-                                                                                                    param->period_adv_report.params.rssi);
+        ESP_LOGI(LOG_TAG, "Periodic adv report, sync handle %d, data status %d, data len %d, rssi %d", 
+                 param->period_adv_report.params.sync_handle,
+                 param->period_adv_report.params.data_status,
+                 param->period_adv_report.params.data_length,
+                 param->period_adv_report.params.rssi);
+        
+        // Decode protobuf message from periodic advertising data
+        if (param->period_adv_report.params.data_length > 0) {
+            // Log raw data for debugging
+            ESP_LOG_BUFFER_HEX(LOG_TAG, param->period_adv_report.params.data, param->period_adv_report.params.data_length);
+            
+            // Parse BLE AD structures; first try Manufacturer Specific Data (type 0xFF)
+            const uint8_t *adv_data = param->period_adv_report.params.data;
+            size_t adv_len = param->period_adv_report.params.data_length;
+
+            const uint8_t *protobuf_data = NULL;
+            size_t protobuf_len = 0;
+            uint16_t company_id = 0;
+
+            bool found = extract_msd_payload(adv_data, adv_len, &protobuf_data, &protobuf_len, &company_id);
+            if (found && protobuf_data && protobuf_len > 0) {
+                ESP_LOGI(LOG_TAG, "MSD company_id=0x%04X, protobuf length: %u", company_id, (unsigned)protobuf_len);
+                ESP_LOG_BUFFER_HEX(LOG_TAG, protobuf_data, protobuf_len);
+                // First try full LwM2MMessage (sender posts LwM2MMessage with appearance inside)
+                lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
+                if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
+                    process_lwm2m_message(&message);
+                    break;
+                }
+                // Fallback to bare LwM2MAppearance if some devices send only custom data
+                lwm2m_LwM2MAppearance appearance = {0};
+                if (decode_lwm2m_appearance(protobuf_data, protobuf_len, &appearance)) {
+                    ESP_LOGI(LOG_TAG, "Decoded bare LwM2MAppearance from MSD payload");
+                    process_lwm2m_appearance(&appearance);
+                    break;
+                } else {
+                    ESP_LOGW(LOG_TAG, "Failed to decode payload as LwM2MMessage or LwM2MAppearance (from MSD)");
+                }
+            }
+
+            // Optional: also allow Service Data - 16-bit UUID carrier (type 0x16)
+            const uint8_t *svc_payload = NULL; size_t svc_len = 0; uint16_t uuid16 = 0;
+            if (extract_service_data_payload(adv_data, adv_len, &svc_payload, &svc_len, &uuid16) && svc_payload && svc_len > 0) {
+                ESP_LOGI(LOG_TAG, "ServiceData UUID16=0x%04X, protobuf length: %u", uuid16, (unsigned)svc_len);
+                ESP_LOG_BUFFER_HEX(LOG_TAG, svc_payload, svc_len);
+                lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
+                if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
+                    process_lwm2m_message(&message);
+                    break;
+                }
+                lwm2m_LwM2MAppearance appearance = {0};
+                if (decode_lwm2m_appearance(svc_payload, svc_len, &appearance)) {
+                    ESP_LOGI(LOG_TAG, "Decoded bare LwM2MAppearance from ServiceData");
+                    process_lwm2m_appearance(&appearance);
+                    break;
+                } else {
+                    ESP_LOGW(LOG_TAG, "Failed to decode payload as LwM2MMessage or LwM2MAppearance (from ServiceData)");
+                }
+            }
+            // If neither carrier worked, warn once per report
+            ESP_LOGW(LOG_TAG, "No decodable LwM2MAppearance found in periodic adv payload");
+        } else {
+            ESP_LOGW(LOG_TAG, "No data in periodic advertising report");
+        }
         break;
 
     default:
