@@ -51,6 +51,9 @@
 #define EXT_SCAN_DURATION     0
 #define EXT_SCAN_PERIOD       0
 
+/* Configuration: Stop scanning after successful handshake to save power */
+#define STOP_SCAN_AFTER_HANDSHAKE   1
+
 /* Match the device name from device-example-esp32c6 Extended Advertising */
 static char remote_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "ESP_EXTENDED_ADV";
 static SemaphoreHandle_t test_sem = NULL;
@@ -277,8 +280,16 @@ static void start_gattc_write_ok(void)
         ESP_LOGE(LOG_TAG, "write 'ok' failed: %s", esp_err_to_name(err));
     } else {
         s_handshake_done = true;
-        ESP_LOGI(LOG_TAG, "Handshake completed, closing connection");
+        ESP_LOGI(LOG_TAG, "✓ Handshake completed successfully!");
         esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        
+#if STOP_SCAN_AFTER_HANDSHAKE
+        /* Stop extended scanning to save power after successful handshake */
+        ESP_LOGI(LOG_TAG, "Stopping extended scan (handshake complete)");
+        esp_ble_gap_stop_ext_scan();
+#else
+        ESP_LOGI(LOG_TAG, "Continuing to scan for periodic advertisements");
+#endif
     }
 }
 
