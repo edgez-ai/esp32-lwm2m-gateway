@@ -30,6 +30,7 @@
 #include "esp_bt_defs.h"
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
+#include "esp_gattc_api.h"
 
 #include "sdkconfig.h"
 
@@ -71,6 +72,216 @@ static esp_ble_gap_periodic_adv_sync_params_t periodic_adv_sync_params = {
 };
 
 bool periodic_sync = false;
+
+/* ---------------- GATT Client state for challenge handshake ---------------- */
+#define GATTC_APP_ID 0x66
+static esp_gatt_if_t s_gattc_if = ESP_GATT_IF_NONE;
+static bool s_gattc_registered = false;
+static bool s_handshake_started = false;
+static bool s_handshake_done = false;
+static uint16_t s_conn_id = 0xFFFF;
+static esp_bd_addr_t s_target_addr = {0};
+static uint8_t s_target_addr_type = BLE_ADDR_TYPE_PUBLIC;
+static bool s_have_target = false;
+static uint16_t s_svc_start = 0, s_svc_end = 0;
+static uint16_t s_char_handle = 0;
+static char s_challenge[16] = {0};
+
+/* Known service/char UUIDs from device-example-esp32c6 */
+static const uint16_t RW_SERVICE_UUID16 = 0x00FF;
+static const uint16_t RW_CHAR_UUID16 = 0xFF01;
+
+static void start_gattc_discovery(void);
+static void start_gattc_challenge_write(void);
+static void start_gattc_readback(void);
+static void start_gattc_write_ok(void);
+
+static void generate_challenge(char *out, size_t out_len)
+{
+    /* generate short base36-like token from tick count */
+    uint32_t r = (uint32_t)xTaskGetTickCount();
+    const char alphabet[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    size_t i = 0;
+    for (; i < out_len - 1 && r; ++i) {
+        out[i] = alphabet[r % 36];
+        r /= 36;
+    }
+    if (i == 0) { out[i++] = 'x'; }
+    out[i] = '\0';
+}
+
+static void maybe_start_handshake_from_appearance(void)
+{
+    if (!s_gattc_registered || s_handshake_started || s_handshake_done) return;
+    if (!s_have_target) {
+        ESP_LOGW(LOG_TAG, "No target address captured yet, cannot start handshake");
+        return;
+    }
+    ESP_LOGI(LOG_TAG, "Opening GATT connection to target addr %02X:%02X:%02X:%02X:%02X:%02X (type %u)",
+             s_target_addr[0], s_target_addr[1], s_target_addr[2], s_target_addr[3], s_target_addr[4], s_target_addr[5], (unsigned)s_target_addr_type);
+    /* IDF v5.5 splits GATTC open API by BLE feature set:
+     *  - esp_ble_gattc_open() when BLE 4.2 feature set is enabled
+     *  - esp_ble_gattc_aux_open() when BLE 5.0 feature set is enabled
+     * Select the proper symbol based on sdkconfig to avoid link errors. */
+#if CONFIG_BT_BLE_50_FEATURES_SUPPORTED
+    esp_err_t err = esp_ble_gattc_aux_open(s_gattc_if, s_target_addr, s_target_addr_type, true);
+#else
+    esp_err_t err = esp_ble_gattc_open(s_gattc_if, s_target_addr, s_target_addr_type, true);
+#endif
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "gattc_open failed: %s", esp_err_to_name(err));
+        return;
+    }
+    s_handshake_started = true;
+}
+
+static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_GATTC_REG_EVT:
+        s_gattc_if = gattc_if;
+        s_gattc_registered = true;
+        ESP_LOGI(LOG_TAG, "GATTC registered (app_id=%d, if=%d)", param->reg.app_id, (int)gattc_if);
+        break;
+    case ESP_GATTC_OPEN_EVT:
+        if (param->open.status != ESP_GATT_OK) {
+            ESP_LOGE(LOG_TAG, "GATTC open failed status=%d", param->open.status);
+            s_handshake_started = false; /* allow retry on next appearance */
+            break;
+        }
+        s_conn_id = param->open.conn_id;
+        ESP_LOGI(LOG_TAG, "GATTC connected, conn_id=%u, mtu=%u", (unsigned)s_conn_id, (unsigned)param->open.mtu);
+        /* As in gatt_client example, request larger MTU first */
+        esp_ble_gattc_send_mtu_req(gattc_if, s_conn_id);
+        break;
+    case ESP_GATTC_DISCONNECT_EVT:
+        ESP_LOGI(LOG_TAG, "GATTC disconnected, reason=0x%X", param->disconnect.reason);
+        s_conn_id = 0xFFFF;
+        s_svc_start = s_svc_end = 0;
+        s_char_handle = 0;
+        s_handshake_started = false;
+        break;
+    case ESP_GATTC_SEARCH_RES_EVT: {
+        const esp_gatt_id_t *sid = &param->search_res.srvc_id;
+        if (sid->uuid.len == ESP_UUID_LEN_16 && sid->uuid.uuid.uuid16 == RW_SERVICE_UUID16) {
+            s_svc_start = param->search_res.start_handle;
+            s_svc_end = param->search_res.end_handle;
+            ESP_LOGI(LOG_TAG, "Found service 0x%04X: start=0x%04X end=0x%04X", RW_SERVICE_UUID16, s_svc_start, s_svc_end);
+        }
+        break; }
+    case ESP_GATTC_CFG_MTU_EVT:
+        ESP_LOGI(LOG_TAG, "MTU updated: %u (status=%d)", (unsigned)param->cfg_mtu.mtu, param->cfg_mtu.status);
+        start_gattc_discovery();
+        break;
+    case ESP_GATTC_SEARCH_CMPL_EVT:
+        if (param->search_cmpl.status == ESP_GATT_OK && s_svc_start && s_svc_end) {
+            /* find characteristic by UUID */
+            uint16_t count = 0;
+            esp_bt_uuid_t uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = RW_CHAR_UUID16 } };
+            esp_gatt_status_t st = esp_ble_gattc_get_attr_count(gattc_if, s_conn_id, ESP_GATT_DB_CHARACTERISTIC, s_svc_start, s_svc_end, 0, &count);
+            if (st == ESP_GATT_OK && count > 0) {
+                esp_gattc_char_elem_t *chars = calloc(count, sizeof(*chars));
+                if (chars) {
+                    uint16_t out_count = count;
+                    st = esp_ble_gattc_get_char_by_uuid(gattc_if, s_conn_id, s_svc_start, s_svc_end, uuid, chars, &out_count);
+                    if (st == ESP_GATT_OK && out_count > 0) {
+                        s_char_handle = chars[0].char_handle;
+                        ESP_LOGI(LOG_TAG, "Found char 0x%04X handle=0x%04X props=0x%02X", RW_CHAR_UUID16, s_char_handle, (unsigned)chars[0].properties);
+                        start_gattc_challenge_write();
+                    } else {
+                        ESP_LOGW(LOG_TAG, "RW char 0x%04X not found in service", RW_CHAR_UUID16);
+                    }
+                    free(chars);
+                } else {
+                    ESP_LOGE(LOG_TAG, "OOM allocating char list");
+                }
+            } else {
+                ESP_LOGW(LOG_TAG, "get_attr_count failed or zero characteristics (st=%d, cnt=%u)", st, (unsigned)count);
+            }
+        } else {
+            ESP_LOGW(LOG_TAG, "Service discovery failed (st=%d)", param->search_cmpl.status);
+        }
+        break;
+    case ESP_GATTC_WRITE_CHAR_EVT:
+        if (param->write.status != ESP_GATT_OK) {
+            ESP_LOGE(LOG_TAG, "Write failed status=%d", param->write.status);
+            break;
+        }
+        ESP_LOGI(LOG_TAG, "Write complete, now reading back response");
+        start_gattc_readback();
+        break;
+    case ESP_GATTC_READ_CHAR_EVT:
+        if (param->read.status != ESP_GATT_OK) {
+            ESP_LOGE(LOG_TAG, "Read failed status=%d", param->read.status);
+            break;
+        }
+        if (param->read.value && param->read.value_len > 0) {
+            ESP_LOGI(LOG_TAG, "Read value (%u bytes): %.*s", (unsigned)param->read.value_len, (int)param->read.value_len, (const char*)param->read.value);
+            const char prefix[] = "hello ";
+            size_t pre_len = strlen(prefix);
+            if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
+                strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) {
+                ESP_LOGI(LOG_TAG, "Challenge success, writing 'ok'");
+                start_gattc_write_ok();
+            } else {
+                ESP_LOGW(LOG_TAG, "Unexpected readback, challenge failed");
+            }
+        }
+        break;
+    case ESP_GATTC_WRITE_DESCR_EVT:
+    case ESP_GATTC_NOTIFY_EVT:
+    default:
+        break;
+    }
+}
+
+static void start_gattc_discovery(void)
+{
+    if (s_conn_id == 0xFFFF) return;
+    esp_bt_uuid_t uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = RW_SERVICE_UUID16 } };
+    esp_err_t err = esp_ble_gattc_search_service(s_gattc_if, s_conn_id, &uuid);
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "search_service failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void start_gattc_challenge_write(void)
+{
+    if (s_conn_id == 0xFFFF || s_char_handle == 0) return;
+    generate_challenge(s_challenge, sizeof(s_challenge));
+    ESP_LOGI(LOG_TAG, "Writing challenge '%s'", s_challenge);
+    esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_char_handle,
+                                             strlen(s_challenge), (uint8_t*)s_challenge,
+                                             ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "write_char failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void start_gattc_readback(void)
+{
+    if (s_conn_id == 0xFFFF || s_char_handle == 0) return;
+    esp_err_t err = esp_ble_gattc_read_char(s_gattc_if, s_conn_id, s_char_handle, ESP_GATT_AUTH_REQ_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "read_char failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void start_gattc_write_ok(void)
+{
+    static const char ok[] = "ok";
+    if (s_conn_id == 0xFFFF || s_char_handle == 0) return;
+    esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_char_handle,
+                                             sizeof(ok) - 1, (uint8_t*)ok,
+                                             ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "write 'ok' failed: %s", esp_err_to_name(err));
+    } else {
+        s_handshake_done = true;
+        ESP_LOGI(LOG_TAG, "Handshake completed, closing connection");
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    }
+}
 
 /* ---- BLE Advertising helpers (standard AD TLV parser) ---- */
 static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
@@ -231,6 +442,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             periodic_adv_sync_params.sid = param->ext_adv_report.params.sid;
 	        periodic_adv_sync_params.addr_type = param->ext_adv_report.params.addr_type;
 	        memcpy(periodic_adv_sync_params.addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
+            /* Save target for GATTC handshake */
+            memcpy(s_target_addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
+            s_target_addr_type = param->ext_adv_report.params.addr_type;
+            s_have_target = true;
             esp_ble_gap_periodic_adv_create_sync(&periodic_adv_sync_params);
 	    }
     }
@@ -263,6 +478,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
                     process_lwm2m_message(&message);
+                    if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) {
+                        /* kick off GATT handshake */
+                        maybe_start_handshake_from_appearance();
+                    }
                     break;
                 }
                 // Fallback to bare LwM2MAppearance if some devices send only custom data
@@ -284,15 +503,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
                     process_lwm2m_message(&message);
+                    if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) {
+                        maybe_start_handshake_from_appearance();
+                    }
                     break;
-                }
-                lwm2m_LwM2MAppearance appearance = {0};
-                if (decode_lwm2m_appearance(svc_payload, svc_len, &appearance)) {
-                    ESP_LOGI(LOG_TAG, "Decoded bare LwM2MAppearance from ServiceData");
-                    process_lwm2m_appearance(&appearance);
-                    break;
-                } else {
-                    ESP_LOGW(LOG_TAG, "Failed to decode payload as LwM2MMessage or LwM2MAppearance (from ServiceData)");
                 }
             }
             // If neither carrier worked, warn once per report
@@ -348,6 +562,9 @@ void app_main(void)
         ESP_LOGE(LOG_TAG, "%s enable bluetooth failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
+    /* Register GATT client for handshake */
+    ESP_ERROR_CHECK(esp_ble_gattc_register_callback(gattc_event_handler));
+    ESP_ERROR_CHECK(esp_ble_gattc_app_register(GATTC_APP_ID));
     ret = esp_ble_gap_register_callback(gap_event_handler);
     if (ret){
         ESP_LOGE(LOG_TAG, "gap register error, error code = %x", ret);
