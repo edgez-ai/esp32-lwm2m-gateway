@@ -51,6 +51,7 @@
 #define EXT_SCAN_DURATION     0
 #define EXT_SCAN_PERIOD       0
 
+/* Match the device name from device-example-esp32c6 Extended Advertising */
 static char remote_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "ESP_EXTENDED_ADV";
 static SemaphoreHandle_t test_sem = NULL;
 
@@ -119,11 +120,9 @@ static void maybe_start_handshake_from_appearance(void)
     }
     ESP_LOGI(LOG_TAG, "Opening GATT connection to target addr %02X:%02X:%02X:%02X:%02X:%02X (type %u)",
              s_target_addr[0], s_target_addr[1], s_target_addr[2], s_target_addr[3], s_target_addr[4], s_target_addr[5], (unsigned)s_target_addr_type);
-    /* IDF v5.5 splits GATTC open API by BLE feature set:
-     *  - esp_ble_gattc_open() when BLE 4.2 feature set is enabled
-     *  - esp_ble_gattc_aux_open() when BLE 5.0 feature set is enabled
-     * Select the proper symbol based on sdkconfig to avoid link errors. */
+    
 #if CONFIG_BT_BLE_50_FEATURES_SUPPORTED
+    /* For BLE 5.0, use aux_open for extended advertising connections */
     esp_err_t err = esp_ble_gattc_aux_open(s_gattc_if, s_target_addr, s_target_addr_type, true);
 #else
     esp_err_t err = esp_ble_gattc_open(s_gattc_if, s_target_addr, s_target_addr_type, true);
@@ -432,9 +431,22 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                                             param->ext_adv_report.params.adv_data_len,
                                             ESP_BLE_AD_TYPE_NAME_CMPL,
                                             &adv_name_len);
-	    if ((adv_name != NULL) && (memcmp(adv_name, remote_device_name, adv_name_len) == 0) && !periodic_sync) {
-            // Note: If there are multiple devices with the same device name, the device may sync to an unintended one.
-            // It is recommended to change the default device name to ensure it is unique.
+	    
+	    /* Log all advertisements with names for debugging */
+	    if (adv_name != NULL && adv_name_len > 0) {
+	        char temp_name[ESP_BLE_ADV_NAME_LEN_MAX + 1] = {0};
+	        size_t copy_len = adv_name_len < ESP_BLE_ADV_NAME_LEN_MAX ? adv_name_len : ESP_BLE_ADV_NAME_LEN_MAX;
+	        memcpy(temp_name, adv_name, copy_len);
+	        ESP_LOGI(LOG_TAG, "Adv from %02X:%02X:%02X:%02X:%02X:%02X, name: '%s' (len=%u)",
+	                 param->ext_adv_report.params.addr[0], param->ext_adv_report.params.addr[1],
+	                 param->ext_adv_report.params.addr[2], param->ext_adv_report.params.addr[3],
+	                 param->ext_adv_report.params.addr[4], param->ext_adv_report.params.addr[5],
+	                 temp_name, (unsigned)adv_name_len);
+	    }
+	    
+	    /* Check for periodic advertising device */
+	    if ((adv_name != NULL) && (adv_name_len == strlen(remote_device_name)) && 
+	        (memcmp(adv_name, remote_device_name, adv_name_len) == 0) && !periodic_sync) {
             periodic_sync = true;
 	        char adv_temp_name[30] = {'0'};
 	        memcpy(adv_temp_name, adv_name, adv_name_len);
@@ -442,11 +454,23 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             periodic_adv_sync_params.sid = param->ext_adv_report.params.sid;
 	        periodic_adv_sync_params.addr_type = param->ext_adv_report.params.addr_type;
 	        memcpy(periodic_adv_sync_params.addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
-            /* Save target for GATTC handshake */
-            memcpy(s_target_addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
-            s_target_addr_type = param->ext_adv_report.params.addr_type;
-            s_have_target = true;
             esp_ble_gap_periodic_adv_create_sync(&periodic_adv_sync_params);
+	    }
+	    
+	    /* Also check for connectable GATT service advertising (ESP_CONNECT) */
+	    if (adv_name != NULL && adv_name_len > 0 && !s_have_target) {
+	        static const char connect_name[] = "ESP_CONNECT";
+	        size_t connect_name_len = strlen(connect_name);
+	        if (adv_name_len == connect_name_len && memcmp(adv_name, connect_name, adv_name_len) == 0) {
+	            /* Save target address for GATT connection */
+                memcpy(s_target_addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
+                s_target_addr_type = param->ext_adv_report.params.addr_type;
+                s_have_target = true;
+                ESP_LOGI(LOG_TAG, "Found ESP_CONNECT device at %02X:%02X:%02X:%02X:%02X:%02X (type %u)",
+                         s_target_addr[0], s_target_addr[1], s_target_addr[2], 
+                         s_target_addr[3], s_target_addr[4], s_target_addr[5], 
+                         (unsigned)s_target_addr_type);
+	        }
 	    }
     }
         break;
