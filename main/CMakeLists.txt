@@ -1,3 +1,3 @@
-idf_component_register(SRCS "periodic_sync_demo.c"
+idf_component_register(SRCS "main.c"
                     INCLUDE_DIRS "."
-                    REQUIRES "lwm2m-protobuf" "nvs_flash" "bt")
+                    REQUIRES "lwm2m-protobuf" "nvs_flash" "bt" "wakaama")
