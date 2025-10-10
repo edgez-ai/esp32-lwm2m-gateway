@@ -3,4 +3,4 @@
 	url = https://github.com/edgez-ai/lwm2m-protobuf.git
 [submodule "components/wakaama"]
 	path = components/wakaama
-	url = https://github.com/eclipse-wakaama/wakaama.git
+	url = https://github.com/edgez-ai/wakaama.git
