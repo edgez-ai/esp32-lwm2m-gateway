@@ -122,8 +122,9 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
         return err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
     }
 
-    /* serialNumber as decimal string */
-    snprintf(serialNumber, sizeof(serialNumber), "%ld", (long)fp.serial);
+     /* serialNumber composed of model (2 hex chars) + serial (10-digit zero-padded decimal)
+         Example: model=0x1A, serial=123 -> "1A0000000123" */
+     snprintf(serialNumber, sizeof(serialNumber), "%02X%010lu", (unsigned int)fp.model, (unsigned long)fp.serial);
 
     /* bootstrap_server bytes -> server string */
     if (fp.bootstrap_server.size > 0) {

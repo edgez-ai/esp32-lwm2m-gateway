@@ -4,4 +4,4 @@
 [submodule "components/wakaama"]
 	path = components/wakaama
 	url = https://github.com/edgez-ai/wakaama.git
-	branch = esp32
+	branch = meshtastic
