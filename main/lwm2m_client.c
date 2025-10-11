@@ -48,59 +48,7 @@ static void save_security_info_to_rtc(const char *uri, const char *identity, siz
     }
 }
 
-static char *security_get_uri2(lwm2m_context_t *lwm2mH, lwm2m_object_t *obj, int instanceId, char *uriBuffer, size_t bufferSize)
-{
-    int size = 1;
-    lwm2m_data_t *dataP = lwm2m_data_new(size);
-    dataP->id = 0; /* server uri */
-    obj->readFunc(lwm2mH, instanceId, &size, &dataP, obj);
-    if (dataP && dataP->type == LWM2M_TYPE_STRING && dataP->value.asBuffer.length > 0) {
-        if (bufferSize > dataP->value.asBuffer.length) {
-            memset(uriBuffer, 0, dataP->value.asBuffer.length + 1);
-            strncpy(uriBuffer, (const char *)dataP->value.asBuffer.buffer, dataP->value.asBuffer.length);
-            lwm2m_data_free(size, dataP);
-            return uriBuffer;
-        }
-    }
-    lwm2m_data_free(size, dataP);
-    return NULL;
-}
 
-static char *security_get_public_id2(lwm2m_context_t *lwm2mH, lwm2m_object_t *obj, int instanceId, size_t *length)
-{
-    int size = 1;
-    lwm2m_data_t *dataP = lwm2m_data_new(size);
-    dataP->id = 3; /* public key or id */
-    obj->readFunc(lwm2mH, instanceId, &size, &dataP, obj);
-    if (dataP && dataP->type == LWM2M_TYPE_OPAQUE) {
-        char *buff = (char *)lwm2m_malloc(dataP->value.asBuffer.length);
-        if (buff) {
-            memcpy(buff, dataP->value.asBuffer.buffer, dataP->value.asBuffer.length);
-            *length = dataP->value.asBuffer.length;
-        }
-        lwm2m_data_free(size, dataP);
-        return buff;
-    }
-    return NULL;
-}
-
-static char *security_get_secret_key2(lwm2m_context_t *lwm2mH, lwm2m_object_t *obj, int instanceId, size_t *length)
-{
-    int size = 1;
-    lwm2m_data_t *dataP = lwm2m_data_new(size);
-    dataP->id = 5; /* secret key */
-    obj->readFunc(lwm2mH, instanceId, &size, &dataP, obj);
-    if (dataP && dataP->type == LWM2M_TYPE_OPAQUE) {
-        char *buff = (char *)lwm2m_malloc(dataP->value.asBuffer.length);
-        if (buff) {
-            memcpy(buff, dataP->value.asBuffer.buffer, dataP->value.asBuffer.length);
-            *length = dataP->value.asBuffer.length;
-        }
-        lwm2m_data_free(size, dataP);
-        return buff;
-    }
-    return NULL;
-}
 
 /* Read factory partition (base64 protobuf) and extract fields for LwM2M security.
  * Replaces legacy serialnumber colon-delimited parsing. We derive:
@@ -285,20 +233,20 @@ static void client_task(void *pvParameters)
         }
 
         if (inactivity_counter >= inactivity_limit && client_handle->state == STATE_READY) {
-            ESP_LOGI(TAG, "Inactivity limit reached, entering deep sleep");
-            esp_wifi_stop();
-            lwm2m_object_t *securityObj = client_data.securityObjP;
-            if (securityObj) {
-                char uri_buf[128] = {0};
-                char *uri = security_get_uri2(client_handle, securityObj, 1, uri_buf, sizeof(uri_buf));
-                size_t identity_len = 0; char *identity = security_get_public_id2(client_handle, securityObj, 1, &identity_len);
-                size_t psk_len = 0; char *psk = security_get_secret_key2(client_handle, securityObj, 1, &psk_len);
-                save_security_info_to_rtc(uri, identity, identity_len, psk, psk_len);
-            }
-            const int wakeup_time_sec = 20;
-            ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000ULL));
-            gettimeofday(&sleep_enter_time, NULL);
-            esp_deep_sleep_start();
+            //ESP_LOGI(TAG, "Inactivity limit reached, entering deep sleep");
+            // esp_wifi_stop();
+            //lwm2m_object_t *securityObj = client_data.securityObjP;
+            //if (securityObj) {
+            //    char uri_buf[128] = {0};
+            //    char *uri = security_get_uri(client_handle, securityObj, 1, uri_buf, sizeof(uri_buf));
+            //    size_t identity_len = 0; char *identity = security_get_public_id(client_handle, securityObj, 1, &identity_len);
+            //    size_t psk_len = 0; char *psk = security_get_secret_key(client_handle, securityObj, 1, &psk_len);
+            //    save_security_info_to_rtc(uri, identity, identity_len, psk, psk_len);
+            //}
+            //const int wakeup_time_sec = 20;
+            //ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000ULL));
+            //gettimeofday(&sleep_enter_time, NULL);
+            //esp_deep_sleep_start();
             inactivity_counter = 0; /* after wake */
         }
         vTaskDelay(pdMS_TO_TICKS(10));
