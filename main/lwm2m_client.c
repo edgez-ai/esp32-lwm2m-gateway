@@ -262,6 +262,6 @@ void lwm2m_client_set_temperature(float temp_celsius)
 void lwm2m_client_start(void)
 {
     /* Configure DTLS logging before client task starts */
-    dtls_set_log_level(DTLS_LOG_DEBUG);
+ //   dtls_set_log_level(DTLS_LOG_DEBUG);
     xTaskCreate(client_task, "client_lwm2m", 8192, NULL, 5, NULL);
 }
