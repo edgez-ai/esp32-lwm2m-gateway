@@ -21,7 +21,7 @@
 /* Keep RTC persisted data across deep sleep resets */
 RTC_DATA_ATTR char rtc_lwm2m_server_uri[128] = {0};
 RTC_DATA_ATTR char rtc_lwm2m_identity[64] = {0};
-RTC_DATA_ATTR char rtc_lwm2m_psk[17] = {0};
+RTC_DATA_ATTR char rtc_lwm2m_psk[64] = {0};
 RTC_DATA_ATTR client_data_t client_data = {0};
 RTC_FAST_ATTR uint8_t proto_buffer[8000]; /* Buffer for lwm2m proto model */
 
@@ -81,23 +81,36 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
     }
 
 
-    /* private_key -> direct copy for PSK (no hex). Truncate to fit and ensure NUL termination.
-       Assumes private_key is stored as ASCII (or at least non-binary) bytes. If the underlying
-       data can include embedded NULs, additional length metadata should be used instead of
-       strlen/termination logic. */
-    size_t pk_len = sizeof(fp.private_key); /* array size per generated .pb.h */
-    /* Determine actual length up to first NUL (treat as C-string) */
-    size_t actual_len = 0;
-    while (actual_len < pk_len && fp.private_key.bytes[actual_len] != '\0') {
-        actual_len++;
-    }
-    if (actual_len == 0) {
+    /* private_key -> shift bytes to alphanumeric range for PSK (32 bytes max).
+       Maps each byte to alphanumeric characters: 0-9 (48-57), A-Z (65-90), a-z (97-122)
+       Total 62 characters, so we use modulo 62 to map 0-255 -> alphanumeric set */
+    size_t pk_len = fp.private_key.size; /* actual protobuf field size */
+    if (pk_len == 0) {
         /* Empty key */
         if (psk_sz > 0) psk_key[0] = '\0';
     } else {
-        size_t copy = MIN(actual_len, psk_sz - 1);
-        memcpy(psk_key, fp.private_key.bytes, copy);
-        psk_key[copy] = '\0';
+        /* Use 16 bytes from private key for PSK (Wakaama/TinyDTLS limit) */
+        size_t bytes_to_process = MIN(pk_len, 16); /* Wakaama PSK limit is 16 bytes */
+        bytes_to_process = MIN(bytes_to_process, psk_sz); /* Respect buffer size */
+        
+        /* Alphanumeric character set: 0-9, A-Z, a-z (62 total characters) */
+        const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        
+        /* Convert each byte to alphanumeric character */
+        for (size_t i = 0; i < bytes_to_process; i++) {
+            uint8_t byte = fp.private_key.bytes[i];
+            psk_key[i] = alphanum[byte % 62]; /* Map 0-255 to 0-61 index */
+        }
+        
+        /* Pad with '0' if we have fewer than 16 bytes */
+        for (size_t i = bytes_to_process; i < 16 && i < psk_sz; i++) {
+            psk_key[i] = '0';
+        }
+        
+        /* Null terminate only if buffer is larger than 16 bytes */
+        if (psk_sz > 16) {
+            psk_key[16] = '\0';
+        }
     }
 
     ESP_LOGI(TAG, "Factory parsed serialNumber=%s pinCode=%s psk(hex)=%s server=%s", serialNumber, pinCode, psk_key, server);
