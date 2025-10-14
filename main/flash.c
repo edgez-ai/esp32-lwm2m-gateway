@@ -148,16 +148,15 @@ void flash_debug_print_factory_partition(const lwm2m_FactoryPartition* p, bool v
         return;
     }
     ESP_LOGI(TAG, "=== LwM2M Factory Partition ===");
-    ESP_LOGI(TAG, "Model: %ld Vendor: %ld Serial: %ld", (long)p->model, (long)p->vendor, (long)p->serial);
-    print_hex_bytes("Public Key", p->public_key, sizeof(p->public_key));
-    print_hex_bytes("Private Key", p->private_key, sizeof(p->private_key));
+    ESP_LOGI(TAG, "Serial: %s", p->serial);
+    print_hex_bytes("Public Key", p->public_key.bytes, sizeof(p->public_key.bytes));
+    print_hex_bytes("Private Key", p->private_key.bytes, sizeof(p->private_key.bytes));
     if (p->bootstrap_server.size > 0) {
         char server[p->bootstrap_server.size + 1];
         memcpy(server, p->bootstrap_server.bytes, p->bootstrap_server.size);
         server[p->bootstrap_server.size] = '\0';
         ESP_LOGI(TAG, "Bootstrap Server: %s", server);
     }
-    print_hex_bytes("Signature", p->signature, 64);
     ESP_LOGI(TAG, "================================");
 }
 

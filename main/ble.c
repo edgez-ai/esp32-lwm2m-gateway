@@ -28,7 +28,7 @@
 #define LOG_TAG "BLE_CLIENT"
 #define EXT_SCAN_DURATION 0
 #define EXT_SCAN_PERIOD   0
-#define STOP_SCAN_AFTER_HANDSHAKE 1
+#define STOP_SCAN_AFTER_HANDSHAKE 0
 
 #define FUNC_SEND_WAIT_SEM(func, sem) do {\
         esp_err_t __err_rc = (func);\
@@ -45,7 +45,55 @@ static bool s_initialized = false;
 static bool s_handshake_done = false;
 static bool s_have_target = false;
 static bool s_handshake_started = false;
-static bool s_periodic_sync = false;
+/* Periodic advertising sync tracking */
+#include "sdkconfig.h"
+#ifdef CONFIG_BT_LE_MAX_PERIODIC_SYNCS
+#define MAX_PERIODIC_SYNCS CONFIG_BT_LE_MAX_PERIODIC_SYNCS
+#else
+#define MAX_PERIODIC_SYNCS 4
+#endif
+typedef struct {
+    bool used;
+    uint8_t sid;
+    esp_bd_addr_t addr;
+    uint8_t addr_type;
+    uint16_t sync_handle; /* filled on ESTAB */
+} periodic_sync_entry_t;
+static periodic_sync_entry_t s_periodic_syncs[MAX_PERIODIC_SYNCS] = {0};
+
+static periodic_sync_entry_t *find_sync_entry(uint8_t sid, const esp_bd_addr_t addr) {
+    for (size_t i = 0; i < MAX_PERIODIC_SYNCS; ++i) {
+        if (s_periodic_syncs[i].used && s_periodic_syncs[i].sid == sid && memcmp(s_periodic_syncs[i].addr, addr, sizeof(esp_bd_addr_t)) == 0) {
+            return &s_periodic_syncs[i];
+        }
+    }
+    return NULL;
+}
+
+static periodic_sync_entry_t *alloc_sync_entry(uint8_t sid, const esp_bd_addr_t addr, uint8_t addr_type) {
+    periodic_sync_entry_t *e = find_sync_entry(sid, addr);
+    if (e) return e; /* already present */
+    for (size_t i = 0; i < MAX_PERIODIC_SYNCS; ++i) {
+        if (!s_periodic_syncs[i].used) {
+            s_periodic_syncs[i].used = true;
+            s_periodic_syncs[i].sid = sid;
+            memcpy(s_periodic_syncs[i].addr, addr, sizeof(esp_bd_addr_t));
+            s_periodic_syncs[i].addr_type = addr_type;
+            s_periodic_syncs[i].sync_handle = 0xFFFF;
+            return &s_periodic_syncs[i];
+        }
+    }
+    return NULL; /* full */
+}
+
+static void free_sync_entry_by_handle(uint16_t sync_handle) {
+    for (size_t i = 0; i < MAX_PERIODIC_SYNCS; ++i) {
+        if (s_periodic_syncs[i].used && s_periodic_syncs[i].sync_handle == sync_handle) {
+            memset(&s_periodic_syncs[i], 0, sizeof(s_periodic_syncs[i]));
+            return;
+        }
+    }
+}
 
 /* Handshake / GATT client state */
 #define GATTC_APP_ID 0x66
@@ -152,17 +200,6 @@ static bool extract_service_data_payload(const uint8_t *adv_data, size_t adv_len
     return false;
 }
 
-static bool decode_lwm2m_appearance(const uint8_t *data, size_t data_len, lwm2m_LwM2MAppearance *appearance)
-{
-    pb_istream_t stream = pb_istream_from_buffer(data, data_len);
-    bool status = pb_decode(&stream, lwm2m_LwM2MAppearance_fields, appearance);
-    if (!status) {
-        ESP_LOGE(LOG_TAG, "Failed to decode protobuf appearance: %s", PB_GET_ERROR(&stream));
-        return false;
-    }
-    return true;
-}
-
 static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM2MMessage *message)
 {
     pb_istream_t stream = pb_istream_from_buffer(data, data_len);
@@ -176,17 +213,9 @@ static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM
 
 static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
 {
-    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - timestamp: %llu", message->timestamp);
-    switch (message->which_body) {
-        case lwm2m_LwM2MMessage_appearance_tag:
-            ESP_LOGI(LOG_TAG, "Device appearance - model: %d, serial: %u", 
-                     message->body.appearance.model, 
-                     message->body.appearance.serial);
-            break;
-        default:
-            ESP_LOGW(LOG_TAG, "Unknown message type: %d", message->which_body);
-            break;
-    }
+    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - timestamp: %llu", message->serial);
+
+
 }
 
 /* ------------- GATT Client operations ------------- */
@@ -295,6 +324,9 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
     case ESP_GATTC_WRITE_CHAR_EVT: if (param->write.status == ESP_GATT_OK) start_gattc_readback(); break;
     case ESP_GATTC_READ_CHAR_EVT:
         if (param->read.status == ESP_GATT_OK && param->read.value && param->read.value_len) {
+            ESP_LOG_BUFFER_HEX(LOG_TAG, param->read.value, param->read.value_len);
+            // TODO send challenge to server
+            
             const char prefix[] = "hello "; size_t pre_len = strlen(prefix);
             if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
                 strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) { start_gattc_write_ok(); }
@@ -320,12 +352,24 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                                                     param->ext_adv_report.params.adv_data_len,
                                                     ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
         if (adv_name && adv_name_len == strlen(s_remote_device_name) &&
-            memcmp(adv_name, s_remote_device_name, adv_name_len) == 0 && !s_periodic_sync) {
-            s_periodic_sync = true;
-            s_periodic_adv_sync_params.sid = param->ext_adv_report.params.sid;
-            s_periodic_adv_sync_params.addr_type = param->ext_adv_report.params.addr_type;
-            memcpy(s_periodic_adv_sync_params.addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
-            esp_ble_gap_periodic_adv_create_sync(&s_periodic_adv_sync_params);
+            memcmp(adv_name, s_remote_device_name, adv_name_len) == 0) {
+            /* Attempt to create periodic sync if not already tracked */
+            periodic_sync_entry_t *entry = alloc_sync_entry(param->ext_adv_report.params.sid,
+                                                            param->ext_adv_report.params.addr,
+                                                            param->ext_adv_report.params.addr_type);
+            if (entry) {
+                s_periodic_adv_sync_params.sid = param->ext_adv_report.params.sid;
+                s_periodic_adv_sync_params.addr_type = param->ext_adv_report.params.addr_type;
+                memcpy(s_periodic_adv_sync_params.addr, param->ext_adv_report.params.addr, sizeof(esp_bd_addr_t));
+                esp_err_t err = esp_ble_gap_periodic_adv_create_sync(&s_periodic_adv_sync_params);
+                if (err != ESP_OK) {
+                    ESP_LOGW(LOG_TAG, "Failed to create periodic sync (sid %u) err=%s", param->ext_adv_report.params.sid, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(LOG_TAG, "Creating periodic sync for SID %u", param->ext_adv_report.params.sid);
+                }
+            } else {
+                /* Either already present or table full */
+            }
         }
         if (adv_name && adv_name_len) {
             static const char connect_name[] = "ESP_CONNECT"; size_t cn_len = strlen(connect_name);
@@ -335,6 +379,39 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             }
         }
         break; }
+    case ESP_GAP_BLE_PERIODIC_ADV_CREATE_SYNC_COMPLETE_EVT:
+        ESP_LOGI(LOG_TAG, "Periodic create sync complete status=%d", param->period_adv_create_sync.status);
+        break;
+    case ESP_GAP_BLE_PERIODIC_ADV_SYNC_ESTAB_EVT: {
+        if (param->periodic_adv_sync_estab.status == ESP_BT_STATUS_SUCCESS) {
+            periodic_sync_entry_t *e = find_sync_entry(param->periodic_adv_sync_estab.sid,
+                                                       param->periodic_adv_sync_estab.adv_addr);
+            if (e) {
+                e->sync_handle = param->periodic_adv_sync_estab.sync_handle;
+            }
+            ESP_LOGI(LOG_TAG, "Periodic sync established sid=%u handle=%u interval=%u phy=%u", 
+                     param->periodic_adv_sync_estab.sid,
+                     param->periodic_adv_sync_estab.sync_handle,
+                     param->periodic_adv_sync_estab.period_adv_interval,
+                     param->periodic_adv_sync_estab.adv_phy);
+        } else {
+            ESP_LOGW(LOG_TAG, "Periodic sync establish failed status=%d", param->periodic_adv_sync_estab.status);
+        }
+        break; }
+    case ESP_GAP_BLE_PERIODIC_ADV_SYNC_LOST_EVT:
+        ESP_LOGW(LOG_TAG, "Periodic sync lost handle=%u", param->periodic_adv_sync_lost.sync_handle);
+        free_sync_entry_by_handle(param->periodic_adv_sync_lost.sync_handle);
+        break;
+    case ESP_GAP_BLE_PERIODIC_ADV_SYNC_TERMINATE_COMPLETE_EVT:
+        /* Some ESP-IDF versions (v5.5.1) ble_period_adv_sync_terminate_cmpl_param do not expose sync_handle */
+        ESP_LOGI(LOG_TAG, "Periodic sync terminated status=%d", param->period_adv_sync_term.status);
+        /* Without the sync handle we cannot precisely free a single entry. Typically a LOST event
+           will already have cleaned it up. If needed, consider tracking the handle at the time
+           esp_ble_gap_periodic_adv_terminate_sync() is called and freeing here. */
+        break;
+    case ESP_GAP_BLE_PERIODIC_ADV_SYNC_CANCEL_COMPLETE_EVT:
+        ESP_LOGI(LOG_TAG, "Periodic sync cancel complete status=%d", param->period_adv_sync_cancel.status);
+        break;
     case ESP_GAP_BLE_PERIODIC_ADV_REPORT_EVT: {
         if (param->period_adv_report.params.data_length > 0) {
             const uint8_t *adv_data = param->period_adv_report.params.data; size_t adv_len = param->period_adv_report.params.data_length;
@@ -343,21 +420,17 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
                     process_lwm2m_message(&message);
-                    if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
+                   // if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
                     break;
                 }
-                lwm2m_LwM2MAppearance appearance = {0};
-                if (decode_lwm2m_appearance(protobuf_data, protobuf_len, &appearance)) {
-                    if (!s_handshake_started) maybe_start_handshake_from_appearance();
-                    break;
-                }
+
             }
             const uint8_t *svc_payload = NULL; size_t svc_len = 0; uint16_t uuid16 = 0;
             if (extract_service_data_payload(adv_data, adv_len, &svc_payload, &svc_len, &uuid16) && svc_payload && svc_len) {
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
                     process_lwm2m_message(&message);
-                    if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
+                  //  if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
                     break;
                 }
             }
@@ -371,7 +444,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 esp_err_t ble_client_init_and_start(void)
 {
     if (s_initialized) return ESP_OK;
-    esp_err_t ret;
+    /* removed unused variable 'ret' */
 
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));

@@ -61,19 +61,16 @@ static void save_security_info_to_rtc(const char *uri, const char *identity, siz
 static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_key, size_t psk_sz, char *server, size_t server_sz)
 {
     if (!pinCode || !psk_key || !server) return ESP_ERR_INVALID_ARG;
-    if (pin_sz > 0) pinCode[0] = '\0'; /* no pin in factory data */
-
     lwm2m_FactoryPartition fp; bool valid = false;
     esp_err_t err = flash_load_lwm2m_factory_partition(&fp, &valid);
     if (err != ESP_OK || !valid) {
         ESP_LOGE(TAG, "Factory partition load failed: %s valid=%d", esp_err_to_name(err), (int)valid);
         return err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
     }
-
+    sprintf(pinCode, "%06ld", fp.pin); /* pinCode not present in factory data, leave empty */
      /* serialNumber composed of model (2 hex chars) + serial (10-digit zero-padded decimal)
          Example: model=0x1A, serial=123 -> "1A0000000123" */
-     snprintf(serialNumber, sizeof(serialNumber), "%02X%010lu", (unsigned int)fp.model, (unsigned long)fp.serial);
-
+    memcpy(serialNumber, fp.serial, sizeof(serialNumber) - 1);
     /* bootstrap_server bytes -> server string */
     if (fp.bootstrap_server.size > 0) {
         size_t copy = fp.bootstrap_server.size < (server_sz - 1) ? fp.bootstrap_server.size : (server_sz - 1);
@@ -83,23 +80,6 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
         server[0] = '\0';
     }
 
-        /* bootstrap_server bytes -> server string */
-    /* If public_key is an array, check if it's non-zero and copy up to its size */
-    size_t public_key_len = sizeof(fp.public_key); // adjust if you know the actual length
-    int has_public_key = 0;
-    for (size_t i = 0; i < public_key_len; ++i) {
-        if (fp.public_key[i] != 0) {
-            has_public_key = 1;
-            break;
-        }
-    }
-    if (has_public_key) {
-        size_t copy = public_key_len < (pin_sz - 1) ? public_key_len : (pin_sz - 1);
-        memcpy(pinCode, fp.public_key, copy);
-        pinCode[copy] = '\0';
-    } else if (pin_sz > 0) {
-        pinCode[0] = '\0';
-    }
 
     /* private_key -> direct copy for PSK (no hex). Truncate to fit and ensure NUL termination.
        Assumes private_key is stored as ASCII (or at least non-binary) bytes. If the underlying
@@ -108,7 +88,7 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
     size_t pk_len = sizeof(fp.private_key); /* array size per generated .pb.h */
     /* Determine actual length up to first NUL (treat as C-string) */
     size_t actual_len = 0;
-    while (actual_len < pk_len && fp.private_key[actual_len] != '\0') {
+    while (actual_len < pk_len && fp.private_key.bytes[actual_len] != '\0') {
         actual_len++;
     }
     if (actual_len == 0) {
@@ -116,7 +96,7 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
         if (psk_sz > 0) psk_key[0] = '\0';
     } else {
         size_t copy = MIN(actual_len, psk_sz - 1);
-        memcpy(psk_key, fp.private_key, copy);
+        memcpy(psk_key, fp.private_key.bytes, copy);
         psk_key[copy] = '\0';
     }
 
