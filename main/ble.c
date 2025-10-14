@@ -213,7 +213,7 @@ static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM
 
 static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
 {
-    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - timestamp: %s", message->serial);
+    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - model: %ld, serial: %ld", message->model, message->serial);
 
 
 }
