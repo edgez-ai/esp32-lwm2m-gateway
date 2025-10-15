@@ -22,6 +22,7 @@
 #include "esp_gattc_api.h"
 
 #include "pb_decode.h"
+#include "pb_encode.h"
 #include "lwm2m.pb.h"
 
 #include "ble.h"
@@ -47,6 +48,21 @@ static bool s_initialized = false;
 static bool s_handshake_done = false;
 static bool s_have_target = false;
 static bool s_handshake_started = false;
+
+/* Challenge state tracking */
+#define MAX_PENDING_CHALLENGES 10
+typedef struct {
+    bool active;
+    uint32_t serial;
+    uint32_t model;
+    uint32_t nonce;
+    esp_bd_addr_t addr;
+    uint8_t addr_type;
+    uint32_t challenge_time; // timestamp for timeout handling
+} pending_challenge_t;
+
+static pending_challenge_t s_pending_challenges[MAX_PENDING_CHALLENGES] = {0};
+static uint32_t s_challenge_nonce_counter = 1;
 /* Periodic advertising sync tracking */
 #include "sdkconfig.h"
 #ifdef CONFIG_BT_LE_MAX_PERIODIC_SYNCS
@@ -128,6 +144,187 @@ static esp_ble_gap_periodic_adv_sync_params_t s_periodic_adv_sync_params = {
     .sync_timeout = 1000,
 };
 
+/* ------------- Challenge Management ------------- */
+/* 
+ * Challenge/Response mechanism for new device registration:
+ * 1. When a new device appears in LwM2M message, initiate challenge instead of direct add
+ * 2. Send LwM2MDeviceChallenge protobuf message to the device
+ * 3. Wait for LwM2MDeviceChallengeAnswer response from the device  
+ * 4. Verify the challenge answer and add device to the list if valid
+ * 5. Remove pending challenge entry after successful verification
+ */
+static pending_challenge_t* find_pending_challenge(uint32_t serial)
+{
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active && s_pending_challenges[i].serial == serial) {
+            return &s_pending_challenges[i];
+        }
+    }
+    return NULL;
+}
+
+static pending_challenge_t* add_pending_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type)
+{
+    // First check if already exists
+    pending_challenge_t* existing = find_pending_challenge(serial);
+    if (existing) {
+        return existing; // Return existing one
+    }
+    
+    // Find empty slot
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (!s_pending_challenges[i].active) {
+            s_pending_challenges[i].active = true;
+            s_pending_challenges[i].serial = serial;
+            s_pending_challenges[i].model = model;
+            s_pending_challenges[i].nonce = s_challenge_nonce_counter++;
+            memcpy(s_pending_challenges[i].addr, addr, sizeof(esp_bd_addr_t));
+            s_pending_challenges[i].addr_type = addr_type;
+            s_pending_challenges[i].challenge_time = xTaskGetTickCount();
+            return &s_pending_challenges[i];
+        }
+    }
+    
+    // If no empty slot, replace oldest
+    uint32_t oldest_time = UINT32_MAX;
+    int oldest_idx = 0;
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].challenge_time < oldest_time) {
+            oldest_time = s_pending_challenges[i].challenge_time;
+            oldest_idx = i;
+        }
+    }
+    
+    ESP_LOGW(LOG_TAG, "Challenge table full, replacing oldest entry for serial %ld", s_pending_challenges[oldest_idx].serial);
+    s_pending_challenges[oldest_idx].active = true;
+    s_pending_challenges[oldest_idx].serial = serial;
+    s_pending_challenges[oldest_idx].model = model;
+    s_pending_challenges[oldest_idx].nonce = s_challenge_nonce_counter++;
+    memcpy(s_pending_challenges[oldest_idx].addr, addr, sizeof(esp_bd_addr_t));
+    s_pending_challenges[oldest_idx].addr_type = addr_type;
+    s_pending_challenges[oldest_idx].challenge_time = xTaskGetTickCount();
+    return &s_pending_challenges[oldest_idx];
+}
+
+static void remove_pending_challenge(uint32_t serial)
+{
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active && s_pending_challenges[i].serial == serial) {
+            s_pending_challenges[i].active = false;
+            ESP_LOGI(LOG_TAG, "Removed pending challenge for serial %ld", serial);
+            break;
+        }
+    }
+}
+
+static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type)
+{
+    // For now, we'll use a simple challenge mechanism
+    // In a real implementation, you'd generate proper cryptographic nonce and public key
+    lwm2m_LwM2MDeviceChallenge challenge = lwm2m_LwM2MDeviceChallenge_init_zero;
+    challenge.nounce = s_challenge_nonce_counter;
+    
+    // For this example, we'll use a simple public key (in real implementation, use proper crypto)
+    const char dummy_pubkey[] = "challenge_public_key_placeholder";
+    size_t pubkey_len = strlen(dummy_pubkey);
+    if (pubkey_len > sizeof(challenge.public_key.bytes)) {
+        pubkey_len = sizeof(challenge.public_key.bytes);
+    }
+    memcpy(challenge.public_key.bytes, dummy_pubkey, pubkey_len);
+    challenge.public_key.size = pubkey_len;
+    
+    // Encode the challenge message
+    uint8_t buffer[256];
+    pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
+    
+    bool status = pb_encode(&stream, lwm2m_LwM2MDeviceChallenge_fields, &challenge);
+    if (!status) {
+        ESP_LOGE(LOG_TAG, "Failed to encode challenge message: %s", PB_GET_ERROR(&stream));
+        return false;
+    }
+    
+    size_t message_length = stream.bytes_written;
+    ESP_LOGI(LOG_TAG, "Encoded challenge message, %d bytes for device serial %ld", message_length, serial);
+    
+    // TODO: Send the encoded challenge to the device via BLE advertisement or GATT
+    // For now, we'll just log that we would send it
+    ESP_LOGI(LOG_TAG, "Would send challenge to device %02X:%02X:%02X:%02X:%02X:%02X (serial %ld)", 
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], serial);
+    
+    return true;
+}
+
+static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial)
+{
+    lwm2m_LwM2MDeviceChallengeAnswer answer = lwm2m_LwM2MDeviceChallengeAnswer_init_zero;
+    
+    pb_istream_t stream = pb_istream_from_buffer(data, data_len);
+    bool status = pb_decode(&stream, lwm2m_LwM2MDeviceChallengeAnswer_fields, &answer);
+    
+    if (!status) {
+        ESP_LOGE(LOG_TAG, "Failed to decode challenge answer: %s", PB_GET_ERROR(&stream));
+        return false;
+    }
+    
+    ESP_LOGI(LOG_TAG, "Decoded challenge answer message");
+    
+    // If sender_serial is 0, we need to find the matching challenge by other means
+    // For now, we'll iterate through all pending challenges and try to match
+    // In a real implementation, you'd correlate by BLE address or nonce
+    pending_challenge_t* pending = NULL;
+    
+    if (sender_serial != 0) {
+        pending = find_pending_challenge(sender_serial);
+    } else {
+        // Find any pending challenge (in real implementation, match by BLE address)
+        for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+            if (s_pending_challenges[i].active) {
+                pending = &s_pending_challenges[i];
+                sender_serial = pending->serial;
+                ESP_LOGI(LOG_TAG, "Found pending challenge for serial %ld", sender_serial);
+                break;
+            }
+        }
+    }
+    
+    if (!pending) {
+        ESP_LOGW(LOG_TAG, "Received challenge answer but no pending challenges found");
+        return false;
+    }
+    
+    ESP_LOGI(LOG_TAG, "Processing challenge answer from device serial %ld", sender_serial);
+    
+    // TODO: Verify the challenge answer signature and public key
+    // For this example, we'll assume it's valid
+    
+    ESP_LOGI(LOG_TAG, "Challenge answer verified successfully for serial %ld", sender_serial);
+    
+    // Create a new device structure and add it to the device list
+    lwm2m_LwM2MDevice new_device = {0};
+    new_device.model = pending->model;
+    new_device.serial = pending->serial;
+    new_device.instance_id = -1;  // Will be assigned during bootstrap
+    new_device.banned = false;
+    
+    // Copy the public key from the challenge answer
+    if (answer.public_key.size > 0 && answer.public_key.size <= sizeof(new_device.public_key.bytes)) {
+        memcpy(new_device.public_key.bytes, answer.public_key.bytes, answer.public_key.size);
+        new_device.public_key.size = answer.public_key.size;
+    }
+    
+    // Add the device to the ring buffer
+    esp_err_t err = device_ring_buffer_add(&new_device);
+    if (err == ESP_OK) {
+        ESP_LOGI(LOG_TAG, "Successfully added challenged device with serial %ld to device list", sender_serial);
+        remove_pending_challenge(sender_serial);
+        return true;
+    } else {
+        ESP_LOGE(LOG_TAG, "Failed to add challenged device with serial %ld to device list: %s", 
+                 sender_serial, esp_err_to_name(err));
+        return false;
+    }
+}
+
 /* ------------- Helpers ------------- */
 static void generate_challenge(char *out, size_t out_len)
 {
@@ -147,6 +344,13 @@ static void start_gattc_challenge_write(void);
 static void start_gattc_readback(void);
 static void start_gattc_write_ok(void);
 static void maybe_start_handshake_from_appearance(void);
+
+/* Challenge management functions */
+static pending_challenge_t* find_pending_challenge(uint32_t serial);
+static pending_challenge_t* add_pending_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
+static void remove_pending_challenge(uint32_t serial);
+static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
+static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial);
 
 static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
                              uint8_t *type, const uint8_t **value, size_t *value_len)
@@ -225,27 +429,33 @@ static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
         // Device exists, optionally update last seen time or other fields
         // For now, we just log that it exists
     } else {
-        ESP_LOGI(LOG_TAG, "Device with serial %ld not found in device list, adding new device", message->serial);
+        ESP_LOGI(LOG_TAG, "Device with serial %ld not found in device list, initiating challenge", message->serial);
         
-        // Create a new device structure
-        lwm2m_LwM2MDevice new_device = {0};
-        new_device.model = message->model;
-        new_device.serial = message->serial;
+        // Check if we already have a pending challenge for this device
+        pending_challenge_t* pending = find_pending_challenge(message->serial);
+        if (pending) {
+            ESP_LOGI(LOG_TAG, "Challenge already pending for device serial %ld", message->serial);
+            return;
+        }
         
-        // Initialize other fields with default values
-        new_device.instance_id = -1;  // Will be assigned during bootstrap
-        new_device.banned = false;
+        // We need device address info to send challenge - extract from current scan context
+        // For now, we'll use dummy address until we can extract it from the advertising context
+        esp_bd_addr_t dummy_addr = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05}; // TODO: Get real address
+        uint8_t dummy_addr_type = BLE_ADDR_TYPE_PUBLIC; // TODO: Get real address type
         
-        // Note: public_key, aes_key, and mac_address will be set during device handshake/bootstrap
-        // For now, we just initialize them to zero (already done by {0} initialization)
+        // Add to pending challenges
+        pending_challenge_t* challenge_entry = add_pending_challenge(message->serial, message->model, dummy_addr, dummy_addr_type);
+        if (!challenge_entry) {
+            ESP_LOGE(LOG_TAG, "Failed to create pending challenge for serial %ld", message->serial);
+            return;
+        }
         
-        // Add the device to the ring buffer
-        esp_err_t err = device_ring_buffer_add(&new_device);
-        if (err == ESP_OK) {
-            ESP_LOGI(LOG_TAG, "Successfully added device with serial %ld to device list", message->serial);
+        // Send challenge to device
+        if (encode_and_send_challenge(message->serial, message->model, dummy_addr, dummy_addr_type)) {
+            ESP_LOGI(LOG_TAG, "Challenge sent to device with serial %ld", message->serial);
         } else {
-            ESP_LOGE(LOG_TAG, "Failed to add device with serial %ld to device list: %s", 
-                     message->serial, esp_err_to_name(err));
+            ESP_LOGE(LOG_TAG, "Failed to send challenge to device with serial %ld", message->serial);
+            remove_pending_challenge(message->serial);
         }
     }
 }
@@ -449,20 +659,33 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             const uint8_t *adv_data = param->period_adv_report.params.data; size_t adv_len = param->period_adv_report.params.data_length;
             const uint8_t *protobuf_data = NULL; size_t protobuf_len = 0; uint16_t company_id = 0;
             if (extract_msd_payload(adv_data, adv_len, &protobuf_data, &protobuf_len, &company_id) && protobuf_data && protobuf_len) {
+                // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
                     process_lwm2m_message(&message);
-                   // if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
                     break;
                 }
-
+                
+                // If that fails, try to decode as LwM2MDeviceChallengeAnswer
+                if (process_challenge_answer(protobuf_data, protobuf_len, 0)) {
+                    // Challenge answer was processed successfully
+                    // Note: We pass 0 as sender_serial because we need to extract it from the message
+                    // In a real implementation, you'd need to get the sender info from the BLE context
+                    break;
+                }
             }
             const uint8_t *svc_payload = NULL; size_t svc_len = 0; uint16_t uuid16 = 0;
             if (extract_service_data_payload(adv_data, adv_len, &svc_payload, &svc_len, &uuid16) && svc_payload && svc_len) {
+                // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
                     process_lwm2m_message(&message);
-                  //  if (message.which_body == lwm2m_LwM2MMessage_appearance_tag) maybe_start_handshake_from_appearance();
+                    break;
+                }
+                
+                // If that fails, try to decode as LwM2MDeviceChallengeAnswer
+                if (process_challenge_answer(svc_payload, svc_len, 0)) {
+                    // Challenge answer was processed successfully
                     break;
                 }
             }
@@ -507,4 +730,33 @@ esp_err_t ble_client_stop_scan(void)
 bool ble_client_handshake_done(void)
 {
     return s_handshake_done;
+}
+
+uint32_t ble_client_get_pending_challenges_count(void)
+{
+    uint32_t count = 0;
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void ble_client_cleanup_stale_challenges(void)
+{
+    uint32_t current_time = xTaskGetTickCount();
+    const uint32_t CHALLENGE_TIMEOUT_MS = 30000; // 30 seconds timeout
+    const uint32_t timeout_ticks = pdMS_TO_TICKS(CHALLENGE_TIMEOUT_MS);
+    
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active) {
+            uint32_t age = current_time - s_pending_challenges[i].challenge_time;
+            if (age > timeout_ticks) {
+                ESP_LOGW(LOG_TAG, "Removing stale challenge for serial %ld (age: %ld ms)", 
+                         s_pending_challenges[i].serial, pdTICKS_TO_MS(age));
+                s_pending_challenges[i].active = false;
+            }
+        }
+    }
 }

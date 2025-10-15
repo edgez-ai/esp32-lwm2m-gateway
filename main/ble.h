@@ -24,6 +24,12 @@ esp_err_t ble_client_stop_scan(void);
 /* Returns true once the GATT handshake (challenge/response + final OK write) has completed. */
 bool ble_client_handshake_done(void);
 
+/* Returns the current number of pending device challenges */
+uint32_t ble_client_get_pending_challenges_count(void);
+
+/* Clean up stale challenges that have exceeded timeout */
+void ble_client_cleanup_stale_challenges(void);
+
 #ifdef __cplusplus
 }
 #endif
