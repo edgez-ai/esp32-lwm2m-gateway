@@ -33,11 +33,10 @@
  #include <lwip/netdb.h>
  #include "flash.h"
  #include "lwm2m_client.h"
+ #include "device.h"
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";
 static float tsens_out; /* local temperature reading passed to lwm2m module */
-
-
 /* BLE GAP/GATT logic removed; now handled inside ble.c */
 
 void app_main(void)
@@ -55,7 +54,31 @@ void app_main(void)
     ESP_ERROR_CHECK(temp_sensor_read_celsius(&tsens_out));
     ESP_LOGI(TAG, "Temperature: %.2f °C", tsens_out);
 
+    /* Initialize device ring buffer */
+    ESP_ERROR_CHECK(device_ring_buffer_init());
 
+    /* Example: Add some test devices to demonstrate ring buffer functionality */
+    ESP_LOGI(TAG, "Demonstrating device ring buffer functionality...");
+    
+    for (int i = 0; i < 5; i++) {
+        lwm2m_LwM2MDevice test_device;
+        uint8_t dummy_key[32] = {0x01, 0x02, 0x03}; // Example key data
+        
+        ESP_ERROR_CHECK(device_create(&test_device, 1001 + i, 2000 + i, 
+                                    dummy_key, sizeof(dummy_key), 
+                                    dummy_key, 100 + i, false));
+        
+        ESP_ERROR_CHECK(device_ring_buffer_add(&test_device));
+    }
+    
+    device_ring_buffer_print_status();
+    
+    // Test finding a device
+    lwm2m_LwM2MDevice *found = device_ring_buffer_find_by_serial(2002);
+    if (found) {
+        ESP_LOGI(TAG, "Found device with serial 2002: Model=%ld, Instance=%ld", 
+                 found->model, found->instance_id);
+    }
 
     /* Start LwM2M client task (moved to lwm2m_client.c) */
     lwm2m_client_start();
