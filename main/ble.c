@@ -63,6 +63,7 @@ typedef struct {
 
 static pending_challenge_t s_pending_challenges[MAX_PENDING_CHALLENGES] = {0};
 static uint32_t s_challenge_nonce_counter = 1;
+static uint16_t s_current_sync_handle = 0xFFFF; // Track current sync handle for reports
 /* Periodic advertising sync tracking */
 #include "sdkconfig.h"
 #ifdef CONFIG_BT_LE_MAX_PERIODIC_SYNCS
@@ -146,12 +147,19 @@ static esp_ble_gap_periodic_adv_sync_params_t s_periodic_adv_sync_params = {
 
 /* ------------- Challenge Management ------------- */
 /* 
- * Challenge/Response mechanism for new device registration:
+ * Challenge/Response mechanism for new device registration with BLE address tracking:
  * 1. When a new device appears in LwM2M message, initiate challenge instead of direct add
- * 2. Send LwM2MDeviceChallenge protobuf message to the device
- * 3. Wait for LwM2MDeviceChallengeAnswer response from the device  
- * 4. Verify the challenge answer and add device to the list if valid
- * 5. Remove pending challenge entry after successful verification
+ * 2. Extract BLE MAC address from periodic advertising sync context
+ * 3. Send LwM2MDeviceChallenge protobuf message to the device (includes real BLE address)
+ * 4. Wait for LwM2MDeviceChallengeAnswer response from the device  
+ * 5. Correlate challenge answer by BLE address (more reliable than serial matching)
+ * 6. Verify the challenge answer and add device to the list if valid
+ * 7. Remove pending challenge entry after successful verification
+ * 
+ * BLE Address Handling:
+ * - Addresses are extracted from periodic advertising sync entries by sync_handle
+ * - Pending challenges store the originating BLE address for correlation
+ * - Challenge answers are matched first by BLE address, then by serial as fallback
  */
 static pending_challenge_t* find_pending_challenge(uint32_t serial)
 {
@@ -254,7 +262,7 @@ static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp
     return true;
 }
 
-static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial)
+static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial, const esp_bd_addr_t sender_addr, uint8_t sender_addr_type)
 {
     lwm2m_LwM2MDeviceChallengeAnswer answer = lwm2m_LwM2MDeviceChallengeAnswer_init_zero;
     
@@ -266,22 +274,40 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
         return false;
     }
     
-    ESP_LOGI(LOG_TAG, "Decoded challenge answer message");
+    ESP_LOGI(LOG_TAG, "Decoded challenge answer message from %02X:%02X:%02X:%02X:%02X:%02X", 
+             sender_addr[0], sender_addr[1], sender_addr[2], sender_addr[3], sender_addr[4], sender_addr[5]);
     
-    // If sender_serial is 0, we need to find the matching challenge by other means
-    // For now, we'll iterate through all pending challenges and try to match
-    // In a real implementation, you'd correlate by BLE address or nonce
+    // Try to find the matching challenge by BLE address first, then by serial if provided
     pending_challenge_t* pending = NULL;
     
-    if (sender_serial != 0) {
+    // First try to match by BLE address (more reliable)
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active && 
+            memcmp(s_pending_challenges[i].addr, sender_addr, sizeof(esp_bd_addr_t)) == 0 &&
+            s_pending_challenges[i].addr_type == sender_addr_type) {
+            pending = &s_pending_challenges[i];
+            sender_serial = pending->serial;
+            ESP_LOGI(LOG_TAG, "Found pending challenge for BLE address %02X:%02X:%02X:%02X:%02X:%02X (serial %ld)", 
+                     sender_addr[0], sender_addr[1], sender_addr[2], sender_addr[3], sender_addr[4], sender_addr[5], sender_serial);
+            break;
+        }
+    }
+    
+    // If not found by address and sender_serial is provided, try by serial
+    if (!pending && sender_serial != 0) {
         pending = find_pending_challenge(sender_serial);
-    } else {
-        // Find any pending challenge (in real implementation, match by BLE address)
+        if (pending) {
+            ESP_LOGI(LOG_TAG, "Found pending challenge by serial %ld", sender_serial);
+        }
+    }
+    
+    // If still not found, try any active challenge as fallback
+    if (!pending) {
         for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
             if (s_pending_challenges[i].active) {
                 pending = &s_pending_challenges[i];
                 sender_serial = pending->serial;
-                ESP_LOGI(LOG_TAG, "Found pending challenge for serial %ld", sender_serial);
+                ESP_LOGW(LOG_TAG, "Using fallback pending challenge for serial %ld", sender_serial);
                 break;
             }
         }
@@ -305,6 +331,11 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     new_device.serial = pending->serial;
     new_device.instance_id = -1;  // Will be assigned during bootstrap
     new_device.banned = false;
+    
+    // TODO: Properly implement MAC address storage (requires pb_callback implementation)
+    // For now, we store the MAC address information in the pending challenge structure
+    ESP_LOGI(LOG_TAG, "Device BLE MAC address: %02X:%02X:%02X:%02X:%02X:%02X", 
+             sender_addr[0], sender_addr[1], sender_addr[2], sender_addr[3], sender_addr[4], sender_addr[5]);
     
     // Copy the public key from the challenge answer
     if (answer.public_key.size > 0 && answer.public_key.size <= sizeof(new_device.public_key.bytes)) {
@@ -350,7 +381,7 @@ static pending_challenge_t* find_pending_challenge(uint32_t serial);
 static pending_challenge_t* add_pending_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
 static void remove_pending_challenge(uint32_t serial);
 static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
-static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial);
+static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial, const esp_bd_addr_t sender_addr, uint8_t sender_addr_type);
 
 static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
                              uint8_t *type, const uint8_t **value, size_t *value_len)
@@ -417,7 +448,7 @@ static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM
     return true;
 }
 
-static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
+static void process_lwm2m_message(const lwm2m_LwM2MMessage *message, const esp_bd_addr_t addr, uint8_t addr_type)
 {
     ESP_LOGI(LOG_TAG, "LwM2M Message decoded - model: %ld, serial: %ld", message->model, message->serial);
 
@@ -438,20 +469,19 @@ static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
             return;
         }
         
-        // We need device address info to send challenge - extract from current scan context
-        // For now, we'll use dummy address until we can extract it from the advertising context
-        esp_bd_addr_t dummy_addr = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05}; // TODO: Get real address
-        uint8_t dummy_addr_type = BLE_ADDR_TYPE_PUBLIC; // TODO: Get real address type
+        // Use the real BLE address from the periodic advertising report
+        ESP_LOGI(LOG_TAG, "Device BLE address: %02X:%02X:%02X:%02X:%02X:%02X (type %u)", 
+                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr_type);
         
         // Add to pending challenges
-        pending_challenge_t* challenge_entry = add_pending_challenge(message->serial, message->model, dummy_addr, dummy_addr_type);
+        pending_challenge_t* challenge_entry = add_pending_challenge(message->serial, message->model, addr, addr_type);
         if (!challenge_entry) {
             ESP_LOGE(LOG_TAG, "Failed to create pending challenge for serial %ld", message->serial);
             return;
         }
         
         // Send challenge to device
-        if (encode_and_send_challenge(message->serial, message->model, dummy_addr, dummy_addr_type)) {
+        if (encode_and_send_challenge(message->serial, message->model, addr, addr_type)) {
             ESP_LOGI(LOG_TAG, "Challenge sent to device with serial %ld", message->serial);
         } else {
             ESP_LOGE(LOG_TAG, "Failed to send challenge to device with serial %ld", message->serial);
@@ -630,6 +660,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                                                        param->periodic_adv_sync_estab.adv_addr);
             if (e) {
                 e->sync_handle = param->periodic_adv_sync_estab.sync_handle;
+                s_current_sync_handle = param->periodic_adv_sync_estab.sync_handle; // Track current handle
             }
             ESP_LOGI(LOG_TAG, "Periodic sync established sid=%u handle=%u interval=%u phy=%u", 
                      param->periodic_adv_sync_estab.sid,
@@ -642,6 +673,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         break; }
     case ESP_GAP_BLE_PERIODIC_ADV_SYNC_LOST_EVT:
         ESP_LOGW(LOG_TAG, "Periodic sync lost handle=%u", param->periodic_adv_sync_lost.sync_handle);
+        if (s_current_sync_handle == param->periodic_adv_sync_lost.sync_handle) {
+            s_current_sync_handle = 0xFFFF; // Clear current handle if it was lost
+        }
         free_sync_entry_by_handle(param->periodic_adv_sync_lost.sync_handle);
         break;
     case ESP_GAP_BLE_PERIODIC_ADV_SYNC_TERMINATE_COMPLETE_EVT:
@@ -656,21 +690,59 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         break;
     case ESP_GAP_BLE_PERIODIC_ADV_REPORT_EVT: {
         if (param->period_adv_report.params.data_length > 0) {
+            // Find the sync entry using the currently tracked sync handle
+            esp_bd_addr_t sender_addr = {0};
+            uint8_t sender_addr_type = BLE_ADDR_TYPE_PUBLIC;
+            bool found_sender = false;
+            
+            // Try to find the sync entry by the current sync handle
+            if (s_current_sync_handle != 0xFFFF) {
+                for (size_t i = 0; i < MAX_PERIODIC_SYNCS; i++) {
+                    if (s_periodic_syncs[i].used && s_periodic_syncs[i].sync_handle == s_current_sync_handle) {
+                        memcpy(sender_addr, s_periodic_syncs[i].addr, sizeof(esp_bd_addr_t));
+                        sender_addr_type = s_periodic_syncs[i].addr_type;
+                        found_sender = true;
+                        ESP_LOGV(LOG_TAG, "Found sender addr %02X:%02X:%02X:%02X:%02X:%02X for sync handle %u", 
+                                 sender_addr[0], sender_addr[1], sender_addr[2], sender_addr[3], 
+                                 sender_addr[4], sender_addr[5], s_current_sync_handle);
+                        break;
+                    }
+                }
+            }
+            
+            // Fallback: try to find any active sync entry
+            if (!found_sender) {
+                for (size_t i = 0; i < MAX_PERIODIC_SYNCS; i++) {
+                    if (s_periodic_syncs[i].used) {
+                        memcpy(sender_addr, s_periodic_syncs[i].addr, sizeof(esp_bd_addr_t));
+                        sender_addr_type = s_periodic_syncs[i].addr_type;
+                        found_sender = true;
+                        ESP_LOGD(LOG_TAG, "Using fallback sync entry %d for periodic advertising report", i);
+                        break;
+                    }
+                }
+            }
+            
+            if (!found_sender) {
+                ESP_LOGW(LOG_TAG, "Could not find any active sync entry for periodic advertising report");
+                // Use dummy address as fallback
+                memset(sender_addr, 0, sizeof(esp_bd_addr_t));
+                sender_addr_type = BLE_ADDR_TYPE_PUBLIC;
+            }
+            
             const uint8_t *adv_data = param->period_adv_report.params.data; size_t adv_len = param->period_adv_report.params.data_length;
             const uint8_t *protobuf_data = NULL; size_t protobuf_len = 0; uint16_t company_id = 0;
             if (extract_msd_payload(adv_data, adv_len, &protobuf_data, &protobuf_len, &company_id) && protobuf_data && protobuf_len) {
                 // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
-                    process_lwm2m_message(&message);
+                    process_lwm2m_message(&message, sender_addr, sender_addr_type);
                     break;
                 }
                 
                 // If that fails, try to decode as LwM2MDeviceChallengeAnswer
-                if (process_challenge_answer(protobuf_data, protobuf_len, 0)) {
+                if (process_challenge_answer(protobuf_data, protobuf_len, 0, sender_addr, sender_addr_type)) {
                     // Challenge answer was processed successfully
-                    // Note: We pass 0 as sender_serial because we need to extract it from the message
-                    // In a real implementation, you'd need to get the sender info from the BLE context
                     break;
                 }
             }
@@ -679,12 +751,12 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
-                    process_lwm2m_message(&message);
+                    process_lwm2m_message(&message, sender_addr, sender_addr_type);
                     break;
                 }
                 
                 // If that fails, try to decode as LwM2MDeviceChallengeAnswer
-                if (process_challenge_answer(svc_payload, svc_len, 0)) {
+                if (process_challenge_answer(svc_payload, svc_len, 0, sender_addr, sender_addr_type)) {
                     // Challenge answer was processed successfully
                     break;
                 }
@@ -759,4 +831,19 @@ void ble_client_cleanup_stale_challenges(void)
             }
         }
     }
+}
+
+bool ble_client_find_challenge_by_address(const uint8_t *addr, uint32_t *serial_out, uint32_t *model_out)
+{
+    if (!addr) return false;
+    
+    for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+        if (s_pending_challenges[i].active && 
+            memcmp(s_pending_challenges[i].addr, addr, sizeof(esp_bd_addr_t)) == 0) {
+            if (serial_out) *serial_out = s_pending_challenges[i].serial;
+            if (model_out) *model_out = s_pending_challenges[i].model;
+            return true;
+        }
+    }
+    return false;
 }

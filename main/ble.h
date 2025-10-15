@@ -30,6 +30,9 @@ uint32_t ble_client_get_pending_challenges_count(void);
 /* Clean up stale challenges that have exceeded timeout */
 void ble_client_cleanup_stale_challenges(void);
 
+/* Find pending challenge by BLE address */
+bool ble_client_find_challenge_by_address(const uint8_t *addr, uint32_t *serial_out, uint32_t *model_out);
+
 #ifdef __cplusplus
 }
 #endif
