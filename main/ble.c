@@ -130,6 +130,9 @@ static char s_challenge[16] = {0};
 static uint8_t s_pending_write_buf[256];
 static size_t s_pending_write_len = 0;
 static bool s_pending_write_ready = false;
+/* Simple read retry after write */
+#define READ_RETRY_MAX 1
+static int s_read_retries_left = 0;
 
 /* Service/Char UUIDs expected on peer */
 static const uint16_t RW_SERVICE_UUID16 = 0x00FF;
@@ -675,19 +678,31 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 s_pending_write_ready = false;
                 s_pending_write_len = 0;
             }
+            // Prepare to read back once; enable one retry if empty/error
+            s_read_retries_left = READ_RETRY_MAX;
             start_gattc_readback();
         }
         break;
-    case ESP_GATTC_READ_CHAR_EVT:
+    case ESP_GATTC_READ_CHAR_EVT: {
+        uint16_t handle = param->read.handle;
+        uint16_t len = param->read.value_len;
+        ESP_LOGI(LOG_TAG, "READ_CHAR_EVT handle=0x%04X status=%d len=%u", handle, param->read.status, (unsigned)len);
         if (param->read.status == ESP_GATT_OK && param->read.value && param->read.value_len) {
             ESP_LOG_BUFFER_HEX(LOG_TAG, param->read.value, param->read.value_len);
             // TODO send challenge to server
-            
+
             const char prefix[] = "hello "; size_t pre_len = strlen(prefix);
             if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
                 strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) { start_gattc_write_ok(); }
+        } else {
+            // If read failed or zero-length, retry once if available
+            if (s_read_retries_left > 0) {
+                s_read_retries_left--;
+                ESP_LOGW(LOG_TAG, "Read returned status=%d len=%u; retrying (%d left)", param->read.status, (unsigned)len, s_read_retries_left);
+                start_gattc_readback();
+            }
         }
-        break;
+        break; }
     default: break;
     }
 }
