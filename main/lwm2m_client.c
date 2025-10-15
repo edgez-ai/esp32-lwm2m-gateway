@@ -30,6 +30,8 @@ static const char *LOCAL_PORT = "56830";
 static float s_temperature_c = 0.0f; /* updated via public setter */
 /* serialNumber is referenced by wakaama registration logic, needs external linkage */
 char serialNumber[64] = {0};
+uint8_t public_key[64] = {0};
+size_t public_key_len = 0;
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
@@ -71,6 +73,8 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
      /* serialNumber composed of model (2 hex chars) + serial (10-digit zero-padded decimal)
          Example: model=0x1A, serial=123 -> "1A0000000123" */
     memcpy(serialNumber, fp.serial, sizeof(serialNumber) - 1);
+    memcpy(public_key, fp.public_key.bytes, fp.public_key.size > sizeof(public_key) ? sizeof(public_key) : fp.public_key.size);
+    public_key_len = fp.public_key.size;
     /* bootstrap_server bytes -> server string */
     if (fp.bootstrap_server.size > 0) {
         size_t copy = fp.bootstrap_server.size < (server_sz - 1) ? fp.bootstrap_server.size : (server_sz - 1);

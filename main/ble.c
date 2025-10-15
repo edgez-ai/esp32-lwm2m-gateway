@@ -49,6 +49,9 @@ static bool s_handshake_done = false;
 static bool s_have_target = false;
 static bool s_handshake_started = false;
 
+extern uint8_t public_key[64];
+extern size_t public_key_len;
+
 /* Challenge state tracking */
 #define MAX_PENDING_CHALLENGES 10
 typedef struct {
@@ -231,15 +234,9 @@ static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp
     // In a real implementation, you'd generate proper cryptographic nonce and public key
     lwm2m_LwM2MDeviceChallenge challenge = lwm2m_LwM2MDeviceChallenge_init_zero;
     challenge.nounce = s_challenge_nonce_counter;
-    
-    // For this example, we'll use a simple public key (in real implementation, use proper crypto)
-    const char dummy_pubkey[] = "challenge_public_key_placeholder";
-    size_t pubkey_len = strlen(dummy_pubkey);
-    if (pubkey_len > sizeof(challenge.public_key.bytes)) {
-        pubkey_len = sizeof(challenge.public_key.bytes);
-    }
-    memcpy(challenge.public_key.bytes, dummy_pubkey, pubkey_len);
-    challenge.public_key.size = pubkey_len;
+    memcpy(challenge.public_key.bytes, public_key, public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len);
+    challenge.public_key.size = public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len;
+
     
     // Encode the challenge message
     uint8_t buffer[256];
