@@ -1,6 +1,7 @@
 /* Flash / Factory data helper module (renamed from factory_partition.*)
  * Provides access to the custom factory data partition plus convenience
  * helpers to read + parse LwM2M factory protobuf and detect stored AES key.
+ * Also handles device data persistence in dedicated partition.
  */
 
 #ifndef FLASH_H
@@ -15,6 +16,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Forward declaration for device ring buffer */
+struct device_ring_buffer_t;
 
 /* ---- Factory partition low level access (same API names with new prefix) ---- */
 esp_err_t flash_factory_partition_init(void);
@@ -35,6 +39,24 @@ esp_err_t flash_load_lwm2m_factory_partition(lwm2m_FactoryPartition* out_partiti
 /* Optional debug printer (safe no-op if partition invalid). */
 void flash_debug_print_factory_partition(const lwm2m_FactoryPartition* partition, bool valid);
 void test_nvs_functionality(void);
+
+/* ---- Device data persistence ---- */
+
+/* Initialize the device data partition */
+esp_err_t flash_device_data_init(void);
+
+/* Save device ring buffer to device data partition */
+esp_err_t flash_device_data_save(const struct device_ring_buffer_t* buffer);
+
+/* Load device ring buffer from device data partition */
+esp_err_t flash_device_data_load(struct device_ring_buffer_t* buffer);
+
+/* Clear all device data from partition */
+esp_err_t flash_device_data_clear(void);
+
+/* Get device data partition handle */
+const esp_partition_t* flash_device_data_get_handle(void);
+
 #ifdef __cplusplus
 }
 #endif

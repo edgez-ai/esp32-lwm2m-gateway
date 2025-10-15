@@ -1,6 +1,7 @@
 /* Implementation of flash helpers (renamed + extended from factory_partition.c) */
 
 #include "flash.h"
+#include "device.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -12,6 +13,7 @@
 
 static const char *TAG = "flash";
 static const esp_partition_t *s_factory_partition = NULL;
+static const esp_partition_t *s_device_data_partition = NULL;
 
 /* NVS constants (kept aligned with previous main.c & ble_lwm2m.c expectations) */
 #define NVS_AES_NAMESPACE "ble_lwm2m"
@@ -235,7 +237,6 @@ void test_nvs_functionality(void)
     
     // Try to read existing value
     uint32_t boot_count = 0;
-    size_t required_size = sizeof(boot_count);
     err = nvs_get_u32(nvs_handle, NVS_TEST_KEY, &boot_count);
     
     if (err == ESP_OK) {
@@ -266,4 +267,195 @@ void test_nvs_functionality(void)
     
     nvs_close(nvs_handle);
     ESP_LOGI(TAG, "=============================");
+}
+
+/* ---- Device data persistence implementation ---- */
+
+#define DEVICE_DATA_MAGIC 0xDEADBE01  /* Magic number to identify valid device data */
+#define DEVICE_DATA_VERSION 1         /* Version for future compatibility */
+
+/* Header structure for device data partition */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t data_size;
+    uint32_t crc32;
+    uint32_t reserved[4];  /* For future use */
+} device_data_header_t;
+
+/* Simple CRC32 implementation */
+static uint32_t calculate_crc32(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return ~crc;
+}
+
+esp_err_t flash_device_data_init(void)
+{
+    if (s_device_data_partition) {
+        return ESP_OK; /* already initialized */
+    }
+    
+    s_device_data_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                      (esp_partition_subtype_t)0x41,
+                                                      "device_data");
+    if (!s_device_data_partition) {
+        ESP_LOGE(TAG, "Device data partition not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    ESP_LOGI(TAG, "Device data partition: addr=0x%08lx size=0x%08lx",
+             s_device_data_partition->address, s_device_data_partition->size);
+    
+    return ESP_OK;
+}
+
+esp_err_t flash_device_data_save(const struct device_ring_buffer_t* buffer)
+{
+    if (!s_device_data_partition) {
+        ESP_LOGE(TAG, "Device data partition not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (!buffer) {
+        ESP_LOGE(TAG, "Buffer pointer is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    ESP_LOGI(TAG, "Saving device data (count: %ld, head: %ld)", buffer->count, buffer->head);
+    
+    /* Calculate required size */
+    size_t data_size = sizeof(struct device_ring_buffer_t);
+    size_t total_size = sizeof(device_data_header_t) + data_size;
+    
+    if (total_size > s_device_data_partition->size) {
+        ESP_LOGE(TAG, "Device data too large for partition (need %zu, have %ld)", 
+                 total_size, s_device_data_partition->size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    /* Prepare header */
+    device_data_header_t header = {
+        .magic = DEVICE_DATA_MAGIC,
+        .version = DEVICE_DATA_VERSION,
+        .data_size = data_size,
+        .crc32 = calculate_crc32((const uint8_t*)buffer, data_size),
+        .reserved = {0}
+    };
+    
+    /* Erase the partition */
+    esp_err_t err = esp_partition_erase_range(s_device_data_partition, 0, s_device_data_partition->size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase device data partition: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    /* Write header */
+    err = esp_partition_write(s_device_data_partition, 0, &header, sizeof(header));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write device data header: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    /* Write device data */
+    err = esp_partition_write(s_device_data_partition, sizeof(header), buffer, data_size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write device data: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    ESP_LOGI(TAG, "Device data saved successfully (size: %zu bytes)", total_size);
+    return ESP_OK;
+}
+
+esp_err_t flash_device_data_load(struct device_ring_buffer_t* buffer)
+{
+    if (!s_device_data_partition) {
+        ESP_LOGE(TAG, "Device data partition not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (!buffer) {
+        ESP_LOGE(TAG, "Buffer pointer is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    /* Read header */
+    device_data_header_t header;
+    esp_err_t err = esp_partition_read(s_device_data_partition, 0, &header, sizeof(header));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read device data header: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    /* Validate header */
+    if (header.magic != DEVICE_DATA_MAGIC) {
+        ESP_LOGW(TAG, "Invalid magic number in device data partition (0x%08lx)", header.magic);
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    if (header.version != DEVICE_DATA_VERSION) {
+        ESP_LOGW(TAG, "Unsupported device data version (%ld)", header.version);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    
+    if (header.data_size != sizeof(struct device_ring_buffer_t)) {
+        ESP_LOGW(TAG, "Device data size mismatch (expected %zu, got %ld)", 
+                 sizeof(struct device_ring_buffer_t), header.data_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    /* Read device data */
+    err = esp_partition_read(s_device_data_partition, sizeof(header), buffer, header.data_size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read device data: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    /* Validate CRC */
+    uint32_t calculated_crc = calculate_crc32((const uint8_t*)buffer, header.data_size);
+    if (calculated_crc != header.crc32) {
+        ESP_LOGE(TAG, "Device data CRC mismatch (expected 0x%08lx, got 0x%08lx)", 
+                 header.crc32, calculated_crc);
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    ESP_LOGI(TAG, "Device data loaded successfully (count: %ld, head: %ld)", 
+             buffer->count, buffer->head);
+    
+    return ESP_OK;
+}
+
+esp_err_t flash_device_data_clear(void)
+{
+    if (!s_device_data_partition) {
+        ESP_LOGE(TAG, "Device data partition not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Clearing device data partition");
+    
+    esp_err_t err = esp_partition_erase_range(s_device_data_partition, 0, s_device_data_partition->size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to clear device data partition: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    ESP_LOGI(TAG, "Device data partition cleared successfully");
+    return ESP_OK;
+}
+
+const esp_partition_t* flash_device_data_get_handle(void)
+{
+    return s_device_data_partition;
 }

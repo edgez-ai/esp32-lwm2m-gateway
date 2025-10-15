@@ -18,7 +18,7 @@ extern "C" {
 #define LWM2M_MAX_DEVICES 100
 
 /* Device ring buffer structure */
-typedef struct {
+typedef struct device_ring_buffer_t {
     lwm2m_LwM2MDevice devices[LWM2M_MAX_DEVICES];
     uint32_t head;          /* Next position to insert */
     uint32_t count;         /* Current number of devices */
@@ -62,6 +62,19 @@ void device_ring_buffer_print_status(void);
 esp_err_t device_create(lwm2m_LwM2MDevice *device, int32_t model, uint32_t serial, 
                        const uint8_t *public_key, size_t pub_key_len,
                        const uint8_t *aes_key, int32_t instance_id, bool banned);
+
+/* Persistence functions */
+/* Initialize device data persistence */
+esp_err_t device_ring_buffer_init_with_persistence(void);
+
+/* Save current device buffer to flash */
+esp_err_t device_ring_buffer_save_to_flash(void);
+
+/* Load device buffer from flash */
+esp_err_t device_ring_buffer_load_from_flash(void);
+
+/* Clear device data from flash */
+esp_err_t device_ring_buffer_clear_flash(void);
 
 #ifdef __cplusplus
 }

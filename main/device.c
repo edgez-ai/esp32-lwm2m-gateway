@@ -5,6 +5,7 @@
  */
 
 #include "device.h"
+#include "flash.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -68,6 +69,15 @@ esp_err_t device_ring_buffer_add(const lwm2m_LwM2MDevice *device)
                  device->serial, g_device_buffer.count, g_device_buffer.capacity);
     } else {
         ESP_LOGI(TAG, "Ring buffer full, replaced oldest device with serial %ld", device->serial);
+    }
+
+    /* Save to flash after adding/updating device */
+    esp_err_t save_err = device_ring_buffer_save_to_flash();
+    if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to save device data to flash: %s", esp_err_to_name(save_err));
+        /* Don't return error - device is still added to memory buffer */
+    } else {
+        ESP_LOGI(TAG, "Device data saved to flash");
     }
 
     return ESP_OK;
@@ -163,6 +173,13 @@ esp_err_t device_ring_buffer_remove_by_serial(uint32_t serial)
             }
 
             ESP_LOGI(TAG, "Removed device with serial %ld (count: %ld)", serial, g_device_buffer.count);
+            
+            /* Save to flash after removing device */
+            esp_err_t save_err = device_ring_buffer_save_to_flash();
+            if (save_err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to save device data to flash: %s", esp_err_to_name(save_err));
+            }
+            
             return ESP_OK;
         }
     }
@@ -204,6 +221,12 @@ void device_ring_buffer_clear(void)
     g_device_buffer.count = 0;
 
     ESP_LOGI(TAG, "Device ring buffer cleared");
+    
+    /* Save to flash after clearing */
+    esp_err_t save_err = device_ring_buffer_save_to_flash();
+    if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to save cleared device data to flash: %s", esp_err_to_name(save_err));
+    }
 }
 
 /* Get the underlying ring buffer (for advanced operations) */
@@ -278,4 +301,63 @@ esp_err_t device_create(lwm2m_LwM2MDevice *device, int32_t model, uint32_t seria
              model, serial, instance_id, banned ? "Yes" : "No");
 
     return ESP_OK;
+}
+
+/* ---- Persistence functions ---- */
+
+esp_err_t device_ring_buffer_init_with_persistence(void)
+{
+    esp_err_t err;
+    
+    /* Initialize device data partition */
+    err = flash_device_data_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize device data partition: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    /* Initialize the ring buffer structure */
+    err = device_ring_buffer_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    /* Try to load existing device data */
+    err = device_ring_buffer_load_from_flash();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Device data loaded from flash successfully");
+        device_ring_buffer_print_status();
+    } else if (err == ESP_ERR_INVALID_CRC || err == ESP_ERR_NOT_SUPPORTED || err == ESP_ERR_INVALID_SIZE) {
+        ESP_LOGW(TAG, "No valid device data found in flash, starting with empty buffer");
+    } else {
+        ESP_LOGE(TAG, "Failed to load device data from flash: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t device_ring_buffer_save_to_flash(void)
+{
+    if (!g_initialized) {
+        ESP_LOGE(TAG, "Device ring buffer not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    return flash_device_data_save(&g_device_buffer);
+}
+
+esp_err_t device_ring_buffer_load_from_flash(void)
+{
+    if (!g_initialized) {
+        ESP_LOGE(TAG, "Device ring buffer not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    return flash_device_data_load(&g_device_buffer);
+}
+
+esp_err_t device_ring_buffer_clear_flash(void)
+{
+    return flash_device_data_clear();
 }
