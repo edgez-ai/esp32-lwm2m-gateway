@@ -126,6 +126,10 @@ static uint8_t s_target_addr_type = BLE_ADDR_TYPE_PUBLIC;
 static uint16_t s_svc_start = 0, s_svc_end = 0;
 static uint16_t s_char_handle = 0;
 static char s_challenge[16] = {0};
+/* Pending write buffer for deferred GATT sends */
+static uint8_t s_pending_write_buf[256];
+static size_t s_pending_write_len = 0;
+static bool s_pending_write_ready = false;
 
 /* Service/Char UUIDs expected on peer */
 static const uint16_t RW_SERVICE_UUID16 = 0x00FF;
@@ -164,6 +168,10 @@ static esp_ble_gap_periodic_adv_sync_params_t s_periodic_adv_sync_params = {
  * - Pending challenges store the originating BLE address for correlation
  * - Challenge answers are matched first by BLE address, then by serial as fallback
  */
+/* Forward declaration needed before first use */
+static esp_err_t send_protobuf_data_via_gatt(const uint8_t *data, size_t data_len);
+static void maybe_start_handshake_from_appearance(void);
+
 static pending_challenge_t* find_pending_challenge(uint32_t serial)
 {
     for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
@@ -251,12 +259,41 @@ static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp
     size_t message_length = stream.bytes_written;
     ESP_LOGI(LOG_TAG, "Encoded challenge message, %d bytes for device serial %ld", message_length, serial);
     
-    // TODO: Send the encoded challenge to the device via BLE advertisement or GATT
-    // For now, we'll just log that we would send it
-    ESP_LOGI(LOG_TAG, "Would send challenge to device %02X:%02X:%02X:%02X:%02X:%02X (serial %ld)", 
+    // Send the encoded challenge to the device via GATT characteristic
+    ESP_LOGI(LOG_TAG, "Sending protobuf challenge via GATT to device %02X:%02X:%02X:%02X:%02X:%02X (serial %ld)", 
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], serial);
     
-    return true;
+    // If we are already connected and have a characteristic, try to send immediately.
+    if (s_conn_id != 0xFFFF && s_char_handle != 0) {
+        esp_err_t err = send_protobuf_data_via_gatt(buffer, message_length);
+        if (err != ESP_OK) {
+            ESP_LOGE(LOG_TAG, "Failed to send challenge via GATT to device %02X:%02X:%02X:%02X:%02X:%02X (serial %ld): %s", 
+                     addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], serial, esp_err_to_name(err));
+            return false;
+        }
+        ESP_LOGI(LOG_TAG, "Successfully wrote challenge message via existing GATT connection");
+        return true;
+    }
+
+    // Otherwise, queue the data and initiate/open a GATT connection to this device.
+    if (message_length > sizeof(s_pending_write_buf)) {
+        ESP_LOGE(LOG_TAG, "Challenge message too large for pending buffer (%u > %u)", (unsigned)message_length, (unsigned)sizeof(s_pending_write_buf));
+        return false;
+    }
+    memcpy(s_pending_write_buf, buffer, message_length);
+    s_pending_write_len = message_length;
+    s_pending_write_ready = true;
+
+    // Point connection target to this device and try to open connection.
+    memcpy(s_target_addr, addr, sizeof(esp_bd_addr_t));
+    s_target_addr_type = addr_type;
+    s_have_target = true;
+    s_handshake_done = false; // ensure handshake flow can proceed
+    maybe_start_handshake_from_appearance();
+
+    ESP_LOGI(LOG_TAG, "Queued challenge for deferred send; opening GATT connection to %02X:%02X:%02X:%02X:%02X:%02X", 
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return true; // queued
 }
 
 static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial, const esp_bd_addr_t sender_addr, uint8_t sender_addr_type)
@@ -372,6 +409,7 @@ static void start_gattc_challenge_write(void);
 static void start_gattc_readback(void);
 static void start_gattc_write_ok(void);
 static void maybe_start_handshake_from_appearance(void);
+static esp_err_t send_protobuf_data_via_gatt(const uint8_t *data, size_t data_len);
 
 /* Challenge management functions */
 static pending_challenge_t* find_pending_challenge(uint32_t serial);
@@ -501,6 +539,19 @@ static void start_gattc_discovery(void)
 static void start_gattc_challenge_write(void)
 {
     if (s_conn_id == 0xFFFF || s_char_handle == 0) return;
+    // If we have a pending protobuf write queued, send that instead of the ASCII challenge.
+    if (s_pending_write_ready && s_pending_write_len > 0) {
+        ESP_LOGI(LOG_TAG, "Writing queued protobuf challenge (%u bytes)", (unsigned)s_pending_write_len);
+        esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_char_handle,
+                                                 s_pending_write_len, (uint8_t*)s_pending_write_buf,
+                                                 ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+        if (err != ESP_OK) {
+            ESP_LOGE(LOG_TAG, "write queued protobuf failed: %s", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    // Fallback to legacy ASCII challenge flow if nothing queued.
     generate_challenge(s_challenge, sizeof(s_challenge));
     ESP_LOGI(LOG_TAG, "Writing challenge '%s'", s_challenge);
     esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_char_handle,
@@ -538,6 +589,33 @@ static void start_gattc_write_ok(void)
         esp_ble_gap_stop_ext_scan();
         #endif
     }
+}
+
+static esp_err_t send_protobuf_data_via_gatt(const uint8_t *data, size_t data_len)
+{
+    if (s_gattc_if == ESP_GATT_IF_NONE) {
+        ESP_LOGE(LOG_TAG, "GATT client interface not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (s_conn_id == 0xFFFF) {
+        ESP_LOGE(LOG_TAG, "No active GATT connection");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (s_char_handle == 0) {
+        ESP_LOGE(LOG_TAG, "No valid characteristic handle");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_char_handle,
+                                             data_len, (uint8_t*)data,
+                                             ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "Failed to write protobuf data to GATT characteristic: %s", esp_err_to_name(err));
+    }
+    
+    return err;
 }
 
 static void maybe_start_handshake_from_appearance(void)
@@ -590,7 +668,16 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             }
         }
         break; }
-    case ESP_GATTC_WRITE_CHAR_EVT: if (param->write.status == ESP_GATT_OK) start_gattc_readback(); break;
+    case ESP_GATTC_WRITE_CHAR_EVT:
+        if (param->write.status == ESP_GATT_OK) {
+            // Clear pending buffer after successful write
+            if (s_pending_write_ready) {
+                s_pending_write_ready = false;
+                s_pending_write_len = 0;
+            }
+            start_gattc_readback();
+        }
+        break;
     case ESP_GATTC_READ_CHAR_EVT:
         if (param->read.status == ESP_GATT_OK && param->read.value && param->read.value_len) {
             ESP_LOG_BUFFER_HEX(LOG_TAG, param->read.value, param->read.value_len);
