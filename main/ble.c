@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 
@@ -24,6 +25,7 @@
 #include "lwm2m.pb.h"
 
 #include "ble.h"
+#include "device.h"
 
 #define LOG_TAG "BLE_CLIENT"
 #define EXT_SCAN_DURATION 0
@@ -215,7 +217,37 @@ static void process_lwm2m_message(const lwm2m_LwM2MMessage *message)
 {
     ESP_LOGI(LOG_TAG, "LwM2M Message decoded - model: %ld, serial: %ld", message->model, message->serial);
 
-
+    // Check if device exists in the device list by serial number
+    lwm2m_LwM2MDevice *existing_device = device_ring_buffer_find_by_serial(message->serial);
+    
+    if (existing_device != NULL) {
+        ESP_LOGI(LOG_TAG, "Device with serial %ld already exists in device list", message->serial);
+        // Device exists, optionally update last seen time or other fields
+        // For now, we just log that it exists
+    } else {
+        ESP_LOGI(LOG_TAG, "Device with serial %ld not found in device list, adding new device", message->serial);
+        
+        // Create a new device structure
+        lwm2m_LwM2MDevice new_device = {0};
+        new_device.model = message->model;
+        new_device.serial = message->serial;
+        
+        // Initialize other fields with default values
+        new_device.instance_id = -1;  // Will be assigned during bootstrap
+        new_device.banned = false;
+        
+        // Note: public_key, aes_key, and mac_address will be set during device handshake/bootstrap
+        // For now, we just initialize them to zero (already done by {0} initialization)
+        
+        // Add the device to the ring buffer
+        esp_err_t err = device_ring_buffer_add(&new_device);
+        if (err == ESP_OK) {
+            ESP_LOGI(LOG_TAG, "Successfully added device with serial %ld to device list", message->serial);
+        } else {
+            ESP_LOGE(LOG_TAG, "Failed to add device with serial %ld to device list: %s", 
+                     message->serial, esp_err_to_name(err));
+        }
+    }
 }
 
 /* ------------- GATT Client operations ------------- */

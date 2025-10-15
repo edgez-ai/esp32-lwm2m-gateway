@@ -54,23 +54,12 @@ void app_main(void)
     ESP_ERROR_CHECK(temp_sensor_read_celsius(&tsens_out));
     ESP_LOGI(TAG, "Temperature: %.2f °C", tsens_out);
 
-    /* Initialize device ring buffer */
-    ESP_ERROR_CHECK(device_ring_buffer_init());
+    /* Initialize device ring buffer with persistence */
+    ESP_ERROR_CHECK(device_ring_buffer_init_with_persistence());
 
     /* Example: Add some test devices to demonstrate ring buffer functionality */
     ESP_LOGI(TAG, "Demonstrating device ring buffer functionality...");
-    
-    for (int i = 0; i < 5; i++) {
-        lwm2m_LwM2MDevice test_device;
-        uint8_t dummy_key[32] = {0x01, 0x02, 0x03}; // Example key data
         
-        ESP_ERROR_CHECK(device_create(&test_device, 1001 + i, 2000 + i, 
-                                    dummy_key, sizeof(dummy_key), 
-                                    dummy_key, 100 + i, false));
-        
-        ESP_ERROR_CHECK(device_ring_buffer_add(&test_device));
-    }
-    
     device_ring_buffer_print_status();
     
     // Test finding a device
