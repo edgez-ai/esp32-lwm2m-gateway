@@ -689,11 +689,52 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
         ESP_LOGI(LOG_TAG, "READ_CHAR_EVT handle=0x%04X status=%d len=%u", handle, param->read.status, (unsigned)len);
         if (param->read.status == ESP_GATT_OK && param->read.value && param->read.value_len) {
             ESP_LOG_BUFFER_HEX(LOG_TAG, param->read.value, param->read.value_len);
-            // TODO send challenge to server
-
-            const char prefix[] = "hello "; size_t pre_len = strlen(prefix);
-            if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
-                strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) { start_gattc_write_ok(); }
+            
+            // Try to decode as protobuf challenge answer first
+            lwm2m_LwM2MDeviceChallengeAnswer answer = lwm2m_LwM2MDeviceChallengeAnswer_init_zero;
+            pb_istream_t stream = pb_istream_from_buffer(param->read.value, param->read.value_len);
+            bool decode_status = pb_decode(&stream, lwm2m_LwM2MDeviceChallengeAnswer_fields, &answer);
+            
+            if (decode_status) {
+                ESP_LOGI(LOG_TAG, "Successfully decoded LwM2MDeviceChallengeAnswer");
+                
+                // Print public key in hex if present
+                if (answer.public_key.size > 0) {
+                    ESP_LOGI(LOG_TAG, "Public key (%u bytes):", (unsigned)answer.public_key.size);
+                    ESP_LOG_BUFFER_HEX(LOG_TAG, answer.public_key.bytes, answer.public_key.size);
+                } else {
+                    ESP_LOGW(LOG_TAG, "No public key in challenge answer");
+                }
+                
+                // Print signature in hex if present
+                if (answer.signature.size > 0) {
+                    ESP_LOGI(LOG_TAG, "Signature (%u bytes):", (unsigned)answer.signature.size);
+                    ESP_LOG_BUFFER_HEX(LOG_TAG, answer.signature.bytes, answer.signature.size);
+                } else {
+                    ESP_LOGW(LOG_TAG, "No signature in challenge answer");
+                }
+                
+                // Get sender address from current GATT connection target
+                esp_bd_addr_t sender_addr;
+                memcpy(sender_addr, s_target_addr, sizeof(esp_bd_addr_t));
+                uint8_t sender_addr_type = s_target_addr_type;
+                
+                // Process the challenge answer
+                if (process_challenge_answer(param->read.value, param->read.value_len, 0, sender_addr, sender_addr_type)) {
+                    ESP_LOGI(LOG_TAG, "Challenge answer processed successfully");
+                    start_gattc_write_ok();
+                } else {
+                    ESP_LOGW(LOG_TAG, "Failed to process challenge answer");
+                }
+            } else {
+                // Fallback to legacy ASCII challenge processing
+                ESP_LOGI(LOG_TAG, "Not a protobuf message, trying legacy ASCII challenge format");
+                const char prefix[] = "hello "; size_t pre_len = strlen(prefix);
+                if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
+                    strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) { 
+                    start_gattc_write_ok(); 
+                }
+            }
         } else {
             // If read failed or zero-length, retry once if available
             if (s_read_retries_left > 0) {
