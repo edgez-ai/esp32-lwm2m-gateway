@@ -25,9 +25,30 @@
 #include "pb_encode.h"
 #include "lwm2m.pb.h"
 
+#include "esp_random.h"
+
 #include "ble.h"
 #include "device.h"
 
+
+/* Conditional minimal crypto support: provide stubs if mbedTLS components not enabled. */
+#ifdef CONFIG_MBEDTLS_AES_C
+#include "mbedtls/aes.h"
+#else
+typedef struct { int dummy; } mbedtls_aes_context; 
+static void mbedtls_aes_init(mbedtls_aes_context *c){(void)c;} 
+static void mbedtls_aes_free(mbedtls_aes_context *c){(void)c;} 
+static int mbedtls_aes_setkey_enc(mbedtls_aes_context *c,const unsigned char *k,unsigned int kb){(void)c;(void)k;(void)kb;return 0;} 
+static int mbedtls_aes_crypt_ecb(mbedtls_aes_context *c,int m,const unsigned char in[16],unsigned char out[16]){(void)c;(void)m;memcpy(out,in,16);return 0;} 
+#define MBEDTLS_AES_ENCRYPT 1
+#endif
+#ifdef CONFIG_MBEDTLS_SHA512_C
+#include "mbedtls/sha512.h"
+#endif
+#ifdef CONFIG_MBEDTLS_ECDH_C
+#include "mbedtls/ecdh.h"
+#include "mbedtls/ecp.h"
+#endif
 /* Conditional minimal crypto support for ChaCha20-Poly1305 */
 #if defined(CONFIG_MBEDTLS_CHACHA20_C) && defined(CONFIG_MBEDTLS_POLY1305_C)
 #include "mbedtls/chacha20.h"
@@ -61,6 +82,13 @@ static bool s_handshake_started = false;
 extern uint8_t public_key[64];
 extern size_t public_key_len;
 
+extern uint8_t private_key[64];
+extern size_t private_key_len;
+
+/* ChaCha20-Poly1305 decryption (forward declarations) */
+static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
+                                                 uint8_t *out, size_t out_cap,
+                                                 uint32_t nonce32,const uint8_t *peer_pub);
 /* Challenge state tracking */
 #define MAX_PENDING_CHALLENGES 10
 typedef struct {
@@ -74,7 +102,6 @@ typedef struct {
 } pending_challenge_t;
 
 static pending_challenge_t s_pending_challenges[MAX_PENDING_CHALLENGES] = {0};
-static uint32_t s_challenge_nonce_counter = 1;
 static uint16_t s_current_sync_handle = 0xFFFF; // Track current sync handle for reports
 /* Periodic advertising sync tracking */
 #include "sdkconfig.h"
@@ -208,7 +235,10 @@ static pending_challenge_t* add_pending_challenge(uint32_t serial, uint32_t mode
             s_pending_challenges[i].active = true;
             s_pending_challenges[i].serial = serial;
             s_pending_challenges[i].model = model;
-            s_pending_challenges[i].nonce = s_challenge_nonce_counter++;
+            // Generate a random 32-bit nonce (avoid zero to reduce trivial collisions)
+            uint32_t n;
+            do { n = esp_random(); } while (n == 0);
+            s_pending_challenges[i].nonce = n;
             memcpy(s_pending_challenges[i].addr, addr, sizeof(esp_bd_addr_t));
             s_pending_challenges[i].addr_type = addr_type;
             s_pending_challenges[i].challenge_time = xTaskGetTickCount();
@@ -230,7 +260,10 @@ static pending_challenge_t* add_pending_challenge(uint32_t serial, uint32_t mode
     s_pending_challenges[oldest_idx].active = true;
     s_pending_challenges[oldest_idx].serial = serial;
     s_pending_challenges[oldest_idx].model = model;
-    s_pending_challenges[oldest_idx].nonce = s_challenge_nonce_counter++;
+    // Generate a random 32-bit nonce (avoid zero to reduce trivial collisions)
+    uint32_t n2;
+    do { n2 = esp_random(); } while (n2 == 0);
+    s_pending_challenges[oldest_idx].nonce = n2;
     memcpy(s_pending_challenges[oldest_idx].addr, addr, sizeof(esp_bd_addr_t));
     s_pending_challenges[oldest_idx].addr_type = addr_type;
     s_pending_challenges[oldest_idx].challenge_time = xTaskGetTickCount();
@@ -250,10 +283,16 @@ static void remove_pending_challenge(uint32_t serial)
 
 static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type)
 {
-    // For now, we'll use a simple challenge mechanism
-    // In a real implementation, you'd generate proper cryptographic nonce and public key
+    // Add to pending challenges first to get the correct nonce
+    pending_challenge_t* challenge_entry = add_pending_challenge(serial, model, addr, addr_type);
+    if (!challenge_entry) {
+        ESP_LOGE(LOG_TAG, "Failed to add pending challenge for device serial %ld", serial);
+        return false;
+    }
+    
+    // Use the nonce from the pending challenge entry to ensure consistency
     lwm2m_LwM2MDeviceChallenge challenge = lwm2m_LwM2MDeviceChallenge_init_zero;
-    challenge.nounce = s_challenge_nonce_counter;
+    challenge.nounce = challenge_entry->nonce;
     memcpy(challenge.public_key.bytes, public_key, public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len);
     challenge.public_key.size = public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len;
 
@@ -366,10 +405,44 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     
     ESP_LOGI(LOG_TAG, "Processing challenge answer from device serial %ld", sender_serial);
     
-    // TODO: Verify the challenge answer signature and public key
-    // For this example, we'll assume it's valid
+    // Decrypt and verify the challenge answer signature using the correct nonce
+    uint8_t decrypted_signature[64]; // Buffer to hold decrypted factory signature
+    bool verification_success = false;
     
-    ESP_LOGI(LOG_TAG, "Challenge answer verified successfully for serial %ld", sender_serial);
+    if (answer.signature.size > 0 && pending) {
+        ESP_LOGI(LOG_TAG, "Decrypting signature (%u bytes) using nonce %u", 
+                 (unsigned)answer.signature.size, (unsigned)pending->nonce);
+        
+        bool decrypt_success = chacha20_poly1305_decrypt_with_nonce(answer.signature.bytes, 
+                                                                   answer.signature.size, 
+                                                                   decrypted_signature, 
+                                                                   sizeof(decrypted_signature),
+                                                                   pending->nonce,
+                                                                answer.public_key.bytes);
+        
+        if (decrypt_success) {
+            size_t decrypted_len = answer.signature.size - 16; // Remove tag length
+            ESP_LOGI(LOG_TAG, "Successfully decrypted signature (%u bytes)", (unsigned)decrypted_len);
+            ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, decrypted_signature, decrypted_len, ESP_LOG_INFO);
+            
+            // TODO: Verify the decrypted signature matches expected factory signature
+            // For now, we consider successful decryption as verification
+            verification_success = true;
+        } else {
+            ESP_LOGE(LOG_TAG, "Failed to decrypt signature for device serial %ld", sender_serial);
+            return false;
+        }
+    } else {
+        ESP_LOGW(LOG_TAG, "No signature to verify or no pending challenge found");
+        return false;
+    }
+    
+    if (verification_success) {
+        ESP_LOGI(LOG_TAG, "Challenge answer verified successfully for serial %ld", sender_serial);
+    } else {
+        ESP_LOGE(LOG_TAG, "Challenge answer verification failed for serial %ld", sender_serial);
+        return false;
+    }
     
     // Create a new device structure and add it to the device list
     lwm2m_LwM2MDevice new_device = {0};
@@ -430,10 +503,11 @@ static void remove_pending_challenge(uint32_t serial);
 static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
 static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial, const esp_bd_addr_t sender_addr, uint8_t sender_addr_type);
 
-/* ChaCha20-Poly1305 AEAD Decryption function */
-static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len, 
-                                                  uint8_t *out, size_t out_cap,
-                                                  uint32_t nonce32)
+
+/* ChaCha20-Poly1305 decryption (forward declarations) */
+static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
+                                                 uint8_t *out, size_t out_cap,
+                                                 uint32_t nonce32,const uint8_t *peer_pub)
 {
     if (!in || in_len < 16 || !out || out_cap == 0) {
         ESP_LOGE(LOG_TAG, "Invalid decrypt parameters");
@@ -455,6 +529,77 @@ static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_le
      * 1. Derive the 32-byte key from ECDH(our_private_key, peer_public_key) + SHA-256
      */
     uint8_t key32[32] = {0}; /* TODO: Derive proper key from ECDH */
+	/* Derive shared secret using SHA-512 based key derivation */
+	/* Since we have both keys as 32-byte values, we'll use HKDF-like approach with SHA-512 */
+#ifdef CONFIG_MBEDTLS_SHA512_C
+	ESP_LOGI(LOG_TAG, "Using SHA-512 based key derivation");
+	
+	/* Combine the keys using SHA-512(our_priv || peer_pub || "ECDH_KEY") */
+	mbedtls_sha512_context sha_ctx;
+	mbedtls_sha512_init(&sha_ctx);
+	int ret = mbedtls_sha512_starts(&sha_ctx, 0); /* 0 = SHA-512 (not SHA-384) */
+	if (ret != 0) {
+		ESP_LOGE(LOG_TAG, "SHA512 start failed: -0x%04x", -ret);
+		mbedtls_sha512_free(&sha_ctx);
+		goto fallback_key_derivation;
+	}
+	
+	/* Hash our private key */
+	ret = mbedtls_sha512_update(&sha_ctx, private_key, 32);
+	if (ret != 0) {
+		ESP_LOGE(LOG_TAG, "SHA512 update private key failed: -0x%04x", -ret);
+		mbedtls_sha512_free(&sha_ctx);
+		goto fallback_key_derivation;
+	}
+	
+	/* Hash peer public key */
+	ret = mbedtls_sha512_update(&sha_ctx, peer_pub, 32);
+	if (ret != 0) {
+		ESP_LOGE(LOG_TAG, "SHA512 update public key failed: -0x%04x", -ret);
+		mbedtls_sha512_free(&sha_ctx);
+		goto fallback_key_derivation;
+	}
+	
+	/* Add a salt/label for key derivation */
+	const char *label = "BLE_LWM2M_ECDH_KEY_V1";
+	ret = mbedtls_sha512_update(&sha_ctx, (const unsigned char*)label, strlen(label));
+	if (ret != 0) {
+		ESP_LOGE(LOG_TAG, "SHA512 update label failed: -0x%04x", -ret);
+		mbedtls_sha512_free(&sha_ctx);
+		goto fallback_key_derivation;
+	}
+	
+	/* Finalize hash to get derived key - SHA-512 produces 64 bytes, truncate to 32 */
+	uint8_t sha512_output[64];
+	ret = mbedtls_sha512_finish(&sha_ctx, sha512_output);
+	mbedtls_sha512_free(&sha_ctx);
+	
+	if (ret != 0) {
+		ESP_LOGE(LOG_TAG, "SHA512 finish failed: -0x%04x", -ret);
+		goto fallback_key_derivation;
+	}
+	
+	/* Use first 32 bytes of SHA-512 output as the derived key */
+	memcpy(key32, sha512_output, 32);
+	
+	ESP_LOGI(LOG_TAG, "SHA-512 key derivation successful");
+	ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, key32, 32, ESP_LOG_DEBUG);
+	goto key_derivation_done;
+	
+fallback_key_derivation:
+#endif
+	/* Fallback: use simple XOR combination if SHA512 not available or failed */
+	ESP_LOGW(LOG_TAG, "Using fallback key derivation");
+	for (int i = 0; i < 32; i++) {
+		key32[i] = private_key[i] ^ peer_pub[i];
+	}
+	ESP_LOGI(LOG_TAG, "Fallback key derivation completed");
+	
+#ifdef CONFIG_MBEDTLS_SHA512_C	
+key_derivation_done:
+#endif
+
+
     
     /* Construct 12-byte nonce: 8 bytes zeros + 4 bytes from challenge nonce */
     uint8_t nonce12[12] = {0};
@@ -462,9 +607,9 @@ static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_le
     nonce12[9] = (nonce32 >> 8) & 0xFF;
     nonce12[10] = (nonce32 >> 16) & 0xFF;
     nonce12[11] = (nonce32 >> 24) & 0xFF;
-    
-    ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, nonce12, 12, ESP_LOG_DEBUG);
-    
+
+    ESP_LOG_BUFFER_HEX(LOG_TAG, nonce12, 12);
+
     /* Extract ciphertext and tag */
     const uint8_t *ciphertext = in;
     const uint8_t *tag = in + ciphertext_len;
@@ -478,7 +623,7 @@ static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_le
     mbedtls_chacha20_context chacha_ctx;
     mbedtls_chacha20_init(&chacha_ctx);
     
-    int ret = mbedtls_chacha20_setkey(&chacha_ctx, key32);
+    ret = mbedtls_chacha20_setkey(&chacha_ctx, key32);
     if (ret != 0) {
         ESP_LOGE(LOG_TAG, "ChaCha20 setkey for Poly1305 key failed: -0x%04x", -ret);
         mbedtls_chacha20_free(&chacha_ctx);
@@ -578,13 +723,7 @@ static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_le
 }
 
 /* Wrapper function for compatibility */
-static bool chacha20_poly1305_decrypt(const uint8_t *in, size_t in_len, 
-                                      uint8_t *out, size_t out_cap)
-{
-    /* Use the last sent nonce as a fallback */
-    uint32_t nonce32 = s_challenge_nonce_counter - 1;
-    return chacha20_poly1305_decrypt_with_nonce(in, in_len, out, out_cap, nonce32);
-}
+/* Removed old chacha20_poly1305_decrypt wrapper that relied on a global counter-based nonce. */
 
 static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
                              uint8_t *type, const uint8_t **value, size_t *value_len)
@@ -676,19 +815,11 @@ static void process_lwm2m_message(const lwm2m_LwM2MMessage *message, const esp_b
         ESP_LOGI(LOG_TAG, "Device BLE address: %02X:%02X:%02X:%02X:%02X:%02X (type %u)", 
                  addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr_type);
         
-        // Add to pending challenges
-        pending_challenge_t* challenge_entry = add_pending_challenge(message->serial, message->model, addr, addr_type);
-        if (!challenge_entry) {
-            ESP_LOGE(LOG_TAG, "Failed to create pending challenge for serial %ld", message->serial);
-            return;
-        }
-        
-        // Send challenge to device
+        // Send challenge to device (this will also add to pending challenges)
         if (encode_and_send_challenge(message->serial, message->model, addr, addr_type)) {
             ESP_LOGI(LOG_TAG, "Challenge sent to device with serial %ld", message->serial);
         } else {
             ESP_LOGE(LOG_TAG, "Failed to send challenge to device with serial %ld", message->serial);
-            remove_pending_challenge(message->serial);
         }
     }
 }
@@ -884,44 +1015,9 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 memcpy(sender_addr, s_target_addr, sizeof(esp_bd_addr_t));
                 uint8_t sender_addr_type = s_target_addr_type;
                 
-                // Find the pending challenge to get the correct nonce for decryption
-                pending_challenge_t* pending_challenge = NULL;
-                for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
-                    if (s_pending_challenges[i].active && 
-                        memcmp(s_pending_challenges[i].addr, sender_addr, sizeof(esp_bd_addr_t)) == 0 &&
-                        s_pending_challenges[i].addr_type == sender_addr_type) {
-                        pending_challenge = &s_pending_challenges[i];
-                        break;
-                    }
-                }
-                
-                // Use ChaCha20-Poly1305 to decrypt the signature here
-                uint8_t decrypted_signature[64]; // Adjust size as needed
-                bool decrypt_success = false;
-                if (pending_challenge) {
-                    ESP_LOGI(LOG_TAG, "Using nonce %u from pending challenge for decryption", 
-                            (unsigned)pending_challenge->nonce);
-                    decrypt_success = chacha20_poly1305_decrypt_with_nonce(answer.signature.bytes, 
-                                                                           answer.signature.size, 
-                                                                           decrypted_signature, 
-                                                                           sizeof(decrypted_signature),
-                                                                           pending_challenge->nonce);
-                } else {
-                    ESP_LOGW(LOG_TAG, "No pending challenge found, using fallback nonce for decryption");
-                    decrypt_success = chacha20_poly1305_decrypt(answer.signature.bytes, answer.signature.size, decrypted_signature, sizeof(decrypted_signature));
-                }
-                
-                if (decrypt_success) {
-                    ESP_LOGI(LOG_TAG, "Successfully decrypted signature (%u bytes)", (unsigned)(answer.signature.size - 16));
-                    ESP_LOG_BUFFER_HEX(LOG_TAG, decrypted_signature, answer.signature.size - 16);
-                } else {
-                    ESP_LOGW(LOG_TAG, "Failed to decrypt signature");
-                }
-                
-                // Process the challenge answer
+                // Process the challenge answer (includes decryption and verification)
                 if (process_challenge_answer(param->read.value, param->read.value_len, 0, sender_addr, sender_addr_type)) {
                     ESP_LOGI(LOG_TAG, "Challenge answer processed successfully");
-                    // add the device to list
                 } else {
                     ESP_LOGW(LOG_TAG, "Failed to process challenge answer");
                 }
