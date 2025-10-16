@@ -28,6 +28,15 @@
 #include "ble.h"
 #include "device.h"
 
+/* Conditional minimal crypto support for ChaCha20-Poly1305 */
+#if defined(CONFIG_MBEDTLS_CHACHA20_C) && defined(CONFIG_MBEDTLS_POLY1305_C)
+#include "mbedtls/chacha20.h"
+#include "mbedtls/poly1305.h"
+#define HAS_CHACHA20_POLY1305 1
+#else
+#define HAS_CHACHA20_POLY1305 0
+#endif
+
 #define LOG_TAG "BLE_CLIENT"
 #define EXT_SCAN_DURATION 0
 #define EXT_SCAN_PERIOD   0
@@ -421,6 +430,162 @@ static void remove_pending_challenge(uint32_t serial);
 static bool encode_and_send_challenge(uint32_t serial, uint32_t model, const esp_bd_addr_t addr, uint8_t addr_type);
 static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint32_t sender_serial, const esp_bd_addr_t sender_addr, uint8_t sender_addr_type);
 
+/* ChaCha20-Poly1305 AEAD Decryption function */
+static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len, 
+                                                  uint8_t *out, size_t out_cap,
+                                                  uint32_t nonce32)
+{
+    if (!in || in_len < 16 || !out || out_cap == 0) {
+        ESP_LOGE(LOG_TAG, "Invalid decrypt parameters");
+        return false;
+    }
+
+#if HAS_CHACHA20_POLY1305
+    ESP_LOGI(LOG_TAG, "Using ChaCha20-Poly1305 AEAD decryption with nonce %u", (unsigned)nonce32);
+    
+    size_t ciphertext_len = in_len - 16; /* Remove 16-byte tag */
+    if (out_cap < ciphertext_len) {
+        ESP_LOGE(LOG_TAG, "Output buffer too small: need %u, have %u", 
+                 (unsigned)ciphertext_len, (unsigned)out_cap);
+        return false;
+    }
+    
+    /* For now, we'll use a placeholder key. 
+     * In a real implementation, you would:
+     * 1. Derive the 32-byte key from ECDH(our_private_key, peer_public_key) + SHA-256
+     */
+    uint8_t key32[32] = {0}; /* TODO: Derive proper key from ECDH */
+    
+    /* Construct 12-byte nonce: 8 bytes zeros + 4 bytes from challenge nonce */
+    uint8_t nonce12[12] = {0};
+    nonce12[8] = (nonce32 >> 0) & 0xFF;
+    nonce12[9] = (nonce32 >> 8) & 0xFF;
+    nonce12[10] = (nonce32 >> 16) & 0xFF;
+    nonce12[11] = (nonce32 >> 24) & 0xFF;
+    
+    ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, nonce12, 12, ESP_LOG_DEBUG);
+    
+    /* Extract ciphertext and tag */
+    const uint8_t *ciphertext = in;
+    const uint8_t *tag = in + ciphertext_len;
+    
+    /* Verify Poly1305 authentication tag first */
+    mbedtls_poly1305_context poly_ctx;
+    mbedtls_poly1305_init(&poly_ctx);
+    
+    /* Derive Poly1305 key from ChaCha20 with counter 0 */
+    uint8_t poly_key[32];
+    mbedtls_chacha20_context chacha_ctx;
+    mbedtls_chacha20_init(&chacha_ctx);
+    
+    int ret = mbedtls_chacha20_setkey(&chacha_ctx, key32);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 setkey for Poly1305 key failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        mbedtls_poly1305_free(&poly_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_chacha20_starts(&chacha_ctx, nonce12, 0); /* counter 0 for Poly1305 key */
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 starts for Poly1305 key failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        mbedtls_poly1305_free(&poly_ctx);
+        return false;
+    }
+    
+    memset(poly_key, 0, 32);
+    ret = mbedtls_chacha20_update(&chacha_ctx, 32, poly_key, poly_key);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 Poly1305 key generation failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        mbedtls_poly1305_free(&poly_ctx);
+        return false;
+    }
+    
+    mbedtls_chacha20_free(&chacha_ctx);
+    
+    /* Initialize Poly1305 with the derived key */
+    ret = mbedtls_poly1305_starts(&poly_ctx, poly_key);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "Poly1305 starts failed: -0x%04x", -ret);
+        mbedtls_poly1305_free(&poly_ctx);
+        return false;
+    }
+    
+    /* Authenticate the ciphertext */
+    ret = mbedtls_poly1305_update(&poly_ctx, ciphertext, ciphertext_len);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "Poly1305 update failed: -0x%04x", -ret);
+        mbedtls_poly1305_free(&poly_ctx);
+        return false;
+    }
+    
+    /* Compute the expected tag */
+    uint8_t computed_tag[16];
+    ret = mbedtls_poly1305_finish(&poly_ctx, computed_tag);
+    mbedtls_poly1305_free(&poly_ctx);
+    
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "Poly1305 finish failed: -0x%04x", -ret);
+        return false;
+    }
+    
+    /* Verify tag matches */
+    if (memcmp(tag, computed_tag, 16) != 0) {
+        ESP_LOGE(LOG_TAG, "Authentication tag verification failed");
+        ESP_LOG_BUFFER_HEX(LOG_TAG, tag, 16);
+        ESP_LOG_BUFFER_HEX(LOG_TAG, computed_tag, 16);
+        return false;
+    }
+    
+    /* Now decrypt the ciphertext */
+    mbedtls_chacha20_init(&chacha_ctx);
+    
+    ret = mbedtls_chacha20_setkey(&chacha_ctx, key32);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 setkey failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_chacha20_starts(&chacha_ctx, nonce12, 1); /* counter starts at 1 for AEAD */
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 starts failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        return false;
+    }
+    
+    /* Decrypt the ciphertext */
+    ret = mbedtls_chacha20_update(&chacha_ctx, ciphertext_len, ciphertext, out);
+    if (ret != 0) {
+        ESP_LOGE(LOG_TAG, "ChaCha20 decrypt failed: -0x%04x", -ret);
+        mbedtls_chacha20_free(&chacha_ctx);
+        return false;
+    }
+    
+    mbedtls_chacha20_free(&chacha_ctx);
+    
+    ESP_LOGI(LOG_TAG, "ChaCha20-Poly1305 decryption successful: %u->%u bytes", 
+             (unsigned)in_len, (unsigned)ciphertext_len);
+    return true;
+    
+#else
+    /* Fallback: ChaCha20-Poly1305 not available */
+    ESP_LOGW(LOG_TAG, "ChaCha20-Poly1305 not available, decryption not supported");
+    return false;
+#endif
+}
+
+/* Wrapper function for compatibility */
+static bool chacha20_poly1305_decrypt(const uint8_t *in, size_t in_len, 
+                                      uint8_t *out, size_t out_cap)
+{
+    /* Use the last sent nonce as a fallback */
+    uint32_t nonce32 = s_challenge_nonce_counter - 1;
+    return chacha20_poly1305_decrypt_with_nonce(in, in_len, out, out_cap, nonce32);
+}
+
 static bool adv_next_element(const uint8_t *data, size_t len, size_t *offset,
                              uint8_t *type, const uint8_t **value, size_t *value_len)
 {
@@ -713,27 +878,57 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 } else {
                     ESP_LOGW(LOG_TAG, "No signature in challenge answer");
                 }
-                
+
                 // Get sender address from current GATT connection target
                 esp_bd_addr_t sender_addr;
                 memcpy(sender_addr, s_target_addr, sizeof(esp_bd_addr_t));
                 uint8_t sender_addr_type = s_target_addr_type;
                 
+                // Find the pending challenge to get the correct nonce for decryption
+                pending_challenge_t* pending_challenge = NULL;
+                for (int i = 0; i < MAX_PENDING_CHALLENGES; i++) {
+                    if (s_pending_challenges[i].active && 
+                        memcmp(s_pending_challenges[i].addr, sender_addr, sizeof(esp_bd_addr_t)) == 0 &&
+                        s_pending_challenges[i].addr_type == sender_addr_type) {
+                        pending_challenge = &s_pending_challenges[i];
+                        break;
+                    }
+                }
+                
+                // Use ChaCha20-Poly1305 to decrypt the signature here
+                uint8_t decrypted_signature[64]; // Adjust size as needed
+                bool decrypt_success = false;
+                if (pending_challenge) {
+                    ESP_LOGI(LOG_TAG, "Using nonce %u from pending challenge for decryption", 
+                            (unsigned)pending_challenge->nonce);
+                    decrypt_success = chacha20_poly1305_decrypt_with_nonce(answer.signature.bytes, 
+                                                                           answer.signature.size, 
+                                                                           decrypted_signature, 
+                                                                           sizeof(decrypted_signature),
+                                                                           pending_challenge->nonce);
+                } else {
+                    ESP_LOGW(LOG_TAG, "No pending challenge found, using fallback nonce for decryption");
+                    decrypt_success = chacha20_poly1305_decrypt(answer.signature.bytes, answer.signature.size, decrypted_signature, sizeof(decrypted_signature));
+                }
+                
+                if (decrypt_success) {
+                    ESP_LOGI(LOG_TAG, "Successfully decrypted signature (%u bytes)", (unsigned)(answer.signature.size - 16));
+                    ESP_LOG_BUFFER_HEX(LOG_TAG, decrypted_signature, answer.signature.size - 16);
+                } else {
+                    ESP_LOGW(LOG_TAG, "Failed to decrypt signature");
+                }
+                
                 // Process the challenge answer
                 if (process_challenge_answer(param->read.value, param->read.value_len, 0, sender_addr, sender_addr_type)) {
                     ESP_LOGI(LOG_TAG, "Challenge answer processed successfully");
-                    start_gattc_write_ok();
+                    // add the device to list
                 } else {
                     ESP_LOGW(LOG_TAG, "Failed to process challenge answer");
                 }
             } else {
                 // Fallback to legacy ASCII challenge processing
                 ESP_LOGI(LOG_TAG, "Not a protobuf message, trying legacy ASCII challenge format");
-                const char prefix[] = "hello "; size_t pre_len = strlen(prefix);
-                if (param->read.value_len >= pre_len && strncmp((const char*)param->read.value, prefix, pre_len) == 0 &&
-                    strstr((const char*)param->read.value + pre_len, s_challenge) != NULL) { 
-                    start_gattc_write_ok(); 
-                }
+                // mark the challenge as failed, and put the device into banned state for 30min
             }
         } else {
             // If read failed or zero-length, retry once if available
