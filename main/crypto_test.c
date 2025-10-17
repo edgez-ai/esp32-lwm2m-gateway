@@ -21,13 +21,13 @@ static const char *TAG = "crypto_test";
 
 #ifdef ESP_PLATFORM
 /**
- * @brief Generate ECDH key pair using P-256 curve
+ * @brief Generate Curve25519 key pair using ECP interface
  * 
  * @param private_key Output buffer for private key (32 bytes)
- * @param public_key Output buffer for public key (65 bytes uncompressed)
+ * @param public_key Output buffer for public key (32 bytes)
  * @return 0 on success, negative error code on failure
  */
-static int generate_ecdh_keypair(uint8_t *private_key, uint8_t *public_key)
+static int generate_curve25519_keypair(uint8_t *private_key, uint8_t *public_key)
 {
     mbedtls_ecp_group grp;
     mbedtls_mpi d;
@@ -45,7 +45,7 @@ static int generate_ecdh_keypair(uint8_t *private_key, uint8_t *public_key)
     mbedtls_ctr_drbg_init(&ctr_drbg);
     
     // Seed the random number generator
-    const char *pers = "ecdh_key_gen";
+    const char *pers = "curve25519_key_gen";
     ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
                                (const unsigned char *) pers, strlen(pers));
     if (ret != 0) {
@@ -53,8 +53,8 @@ static int generate_ecdh_keypair(uint8_t *private_key, uint8_t *public_key)
         goto cleanup;
     }
     
-    // Load the P-256 curve
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+    // Load Curve25519
+    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
     if (ret != 0) {
         ESP_LOGE(TAG, "mbedtls_ecp_group_load failed: -0x%04x", -ret);
         goto cleanup;
@@ -74,11 +74,17 @@ static int generate_ecdh_keypair(uint8_t *private_key, uint8_t *public_key)
         goto cleanup;
     }
     
-    // Export public key (65 bytes uncompressed format)
-    ret = mbedtls_ecp_point_write_binary(&grp, &Q,
-                                        MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, public_key, 65);
-    if (ret != 0 || olen != 65) {
-        ESP_LOGE(TAG, "Public key export failed: -0x%04x, olen=%d", -ret, olen);
+    // Export public key (32 bytes for Curve25519)
+    // For Montgomery curves like Curve25519, try to export directly as 32 bytes
+    ret = mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, public_key, 32);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Public key export failed: -0x%04x", -ret);
+        goto cleanup;
+    }
+    
+    // Verify we got the expected 32-byte public key
+    if (olen != 32) {
+        ESP_LOGE(TAG, "Unexpected public key length, expected 32 got %d", olen);
         ret = -1;
         goto cleanup;
     }
@@ -95,36 +101,36 @@ cleanup:
 
 void test_ecdh_crypto_with_keygen(void)
 {
-    ESP_LOGI(TAG, "=== Starting ECDH Crypto Test with Real Key Generation ===");
+    ESP_LOGI(TAG, "=== Starting Curve25519 Crypto Test with Real Key Generation ===");
     
 #ifdef ESP_PLATFORM
     // Generate Alice's key pair
     uint8_t alice_private_key[32];
-    uint8_t alice_public_key[65];
+    uint8_t alice_public_key[32];
     
     // Generate Bob's key pair  
     uint8_t bob_private_key[32];
-    uint8_t bob_public_key[65];
+    uint8_t bob_public_key[32];
     
-    ESP_LOGI(TAG, "Step 1: Generating Alice's ECDH key pair...");
-    int result = generate_ecdh_keypair(alice_private_key, alice_public_key);
+    ESP_LOGI(TAG, "Step 1: Generating Alice's Curve25519 key pair...");
+    int result = generate_curve25519_keypair(alice_private_key, alice_public_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Alice's key generation failed");
         return;
     }
     ESP_LOGI(TAG, "Alice's key pair generated successfully!");
     ESP_LOGI(TAG, "Alice's public key:");
-    ESP_LOG_BUFFER_HEX(TAG, alice_public_key, 65);
+    ESP_LOG_BUFFER_HEX(TAG, alice_public_key, 32);
     
-    ESP_LOGI(TAG, "Step 2: Generating Bob's ECDH key pair...");
-    result = generate_ecdh_keypair(bob_private_key, bob_public_key);
+    ESP_LOGI(TAG, "Step 2: Generating Bob's Curve25519 key pair...");
+    result = generate_curve25519_keypair(bob_private_key, bob_public_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Bob's key generation failed");
         return;
     }
     ESP_LOGI(TAG, "Bob's key pair generated successfully!");
     ESP_LOGI(TAG, "Bob's public key:");
-    ESP_LOG_BUFFER_HEX(TAG, bob_public_key, 65);
+    ESP_LOG_BUFFER_HEX(TAG, bob_public_key, 32);
     
     // Step 3: Alice derives shared key using Bob's public key
     uint8_t alice_shared_key[32];
@@ -150,9 +156,9 @@ void test_ecdh_crypto_with_keygen(void)
     
     // Step 5: Verify both parties derived the same key
     if (memcmp(alice_shared_key, bob_shared_key, 32) == 0) {
-        ESP_LOGI(TAG, "✓ ECDH Key Exchange Successful - Both parties have same shared key!");
+        ESP_LOGI(TAG, "✓ Curve25519 Key Exchange Successful - Both parties have same shared key!");
     } else {
-        ESP_LOGE(TAG, "✗ ECDH Key Exchange Failed - Shared keys don't match!");
+        ESP_LOGE(TAG, "✗ Curve25519 Key Exchange Failed - Shared keys don't match!");
         return;
     }
     
@@ -214,7 +220,7 @@ void test_ecdh_crypto_with_keygen(void)
         ESP_LOGE(TAG, "✗ Message corruption detected!");
     }
     
-    ESP_LOGI(TAG, "=== ECDH Crypto Test with Real Key Generation Complete ===");
+    ESP_LOGI(TAG, "=== Curve25519 Crypto Test with Real Key Generation Complete ===");
     
 #else
     ESP_LOGW(TAG, "Real key generation test skipped - requires ESP-IDF platform");
