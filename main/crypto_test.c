@@ -119,6 +119,8 @@ void test_ecdh_crypto_with_keygen(void)
         return;
     }
     ESP_LOGI(TAG, "Alice's key pair generated successfully!");
+    ESP_LOGI(TAG, "Alice's private key:");
+    ESP_LOG_BUFFER_HEX(TAG, alice_private_key, 32);
     ESP_LOGI(TAG, "Alice's public key:");
     ESP_LOG_BUFFER_HEX(TAG, alice_public_key, 32);
     
@@ -129,6 +131,8 @@ void test_ecdh_crypto_with_keygen(void)
         return;
     }
     ESP_LOGI(TAG, "Bob's key pair generated successfully!");
+    ESP_LOGI(TAG, "Bob's private key:");
+    ESP_LOG_BUFFER_HEX(TAG, bob_private_key, 32);
     ESP_LOGI(TAG, "Bob's public key:");
     ESP_LOG_BUFFER_HEX(TAG, bob_public_key, 32);
     

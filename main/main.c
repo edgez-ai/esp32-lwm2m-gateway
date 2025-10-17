@@ -36,6 +36,7 @@
 #include "device.h"
 #include "lwm2m_helpers.h"
 #include "crypto_test.h"
+#include "crypto_test_fixed.h"
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";
 static float tsens_out; /* local temperature reading passed to lwm2m module */
@@ -56,9 +57,6 @@ void app_main(void)
     ESP_ERROR_CHECK(temp_sensor_read_celsius(&tsens_out));
     ESP_LOGI(TAG, "Temperature: %.2f °C", tsens_out);
 
-    /* Test ECDH with real key generation */
-    test_ecdh_crypto_with_keygen();
-
     /* Initialize device ring buffer with persistence */
     ESP_ERROR_CHECK(device_ring_buffer_init_with_persistence());
 
@@ -66,16 +64,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Demonstrating device ring buffer functionality...");
         
     device_ring_buffer_print_status();
-    
-    // Test finding a device
-    lwm2m_LwM2MDevice *found = device_ring_buffer_find_by_serial(2002);
-    if (found) {
-        ESP_LOGI(TAG, "Found device with serial 2002: Model=%ld, Instance=%ld", 
-                 found->model, found->instance_id);
-    }
 
     /* Start LwM2M client task (moved to lwm2m_client.c) */
     lwm2m_client_start();
+
+    /* Test ECDH with real key generation (original implementation) */
+    test_ecdh_crypto_with_keygen();
+
+    /* Test CORRECTED X25519 implementation for Java compatibility */
+    ESP_LOGI(TAG, "Running corrected X25519 implementation test...");
+    test_fixed_curve25519_crypto();
 
     /* Start BLE client (scanning + handshake) */
     esp_err_t ble_ret = ble_client_init_and_start();
