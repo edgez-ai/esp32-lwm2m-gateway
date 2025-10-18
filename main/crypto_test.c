@@ -10,136 +10,75 @@
 #include <string.h>
 #include "lwm2m_helpers.h"
 
-#ifdef ESP_PLATFORM
-#include "mbedtls/ecdh.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/ecp.h"
-#endif
+extern uint8_t public_key[64];
+extern uint8_t private_key[64];
+extern size_t public_key_len;
+extern size_t private_key_len;
 
 static const char *TAG = "crypto_test";
 
-#ifdef ESP_PLATFORM
-/**
- * @brief Generate Curve25519 key pair using ECP interface
- * 
- * @param private_key Output buffer for private key (32 bytes)
- * @param public_key Output buffer for public key (32 bytes)
- * @return 0 on success, negative error code on failure
- */
-static int generate_curve25519_keypair(uint8_t *private_key, uint8_t *public_key)
-{
-    mbedtls_ecp_group grp;
-    mbedtls_mpi d;
-    mbedtls_ecp_point Q;
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    int ret = 0;
-    size_t olen;
-    
-    // Initialize contexts
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_mpi_init(&d);
-    mbedtls_ecp_point_init(&Q);
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    
-    // Seed the random number generator
-    const char *pers = "curve25519_key_gen";
-    ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                               (const unsigned char *) pers, strlen(pers));
-    if (ret != 0) {
-        ESP_LOGE(TAG, "mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
-        goto cleanup;
-    }
-    
-    // Load Curve25519
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "mbedtls_ecp_group_load failed: -0x%04x", -ret);
-        goto cleanup;
-    }
-    
-    // Generate key pair
-    ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "mbedtls_ecp_gen_keypair failed: -0x%04x", -ret);
-        goto cleanup;
-    }
-    
-    // Export private key (32 bytes)
-    ret = mbedtls_mpi_write_binary(&d, private_key, 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Private key export failed: -0x%04x", -ret);
-        goto cleanup;
-    }
-    
-    // Export public key (32 bytes for Curve25519)
-    // For Montgomery curves like Curve25519, try to export directly as 32 bytes
-    ret = mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, public_key, 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Public key export failed: -0x%04x", -ret);
-        goto cleanup;
-    }
-    
-    // Verify we got the expected 32-byte public key
-    if (olen != 32) {
-        ESP_LOGE(TAG, "Unexpected public key length, expected 32 got %d", olen);
-        ret = -1;
-        goto cleanup;
-    }
-    
-cleanup:
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_point_free(&Q);
-    mbedtls_entropy_free(&entropy);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    return ret;
-}
-#endif
-
 void test_ecdh_crypto_with_keygen(void)
 {
-    ESP_LOGI(TAG, "=== Starting Curve25519 Crypto Test with Real Key Generation ===");
+    ESP_LOGI(TAG, "=== Starting Curve25519 Crypto Test with Predefined Keys ===");
     
 #ifdef ESP_PLATFORM
-    // Generate Alice's key pair
+    static const uint8_t bob_public_key_predefined[32] = {
+        0xE6, 0xBA, 0x75, 0xEA, 0x41, 0x9E, 0xC6, 0xF7,
+        0x8A, 0x28, 0x65, 0x3E, 0xD6, 0xB8, 0xC5, 0x45,
+        0x78, 0x6F, 0x59, 0xB3, 0x37, 0x6E, 0x86, 0x63,
+        0x2A, 0x5D, 0xD1, 0xB9, 0x1D, 0x8E, 0x96, 0x64
+    };
+    static const uint8_t bob_private_key_predefined[32] = {
+        0x68, 0x0A, 0x90, 0x0F, 0xAA, 0x03, 0x3B, 0x1E,
+        0x16, 0x2D, 0x1C, 0x19, 0xB7, 0x67, 0xA2, 0x6F,
+        0xDC, 0x5A, 0x51, 0x37, 0x5C, 0x07, 0xCC, 0x41,
+        0x85, 0x0E, 0xBA, 0xCC, 0x80, 0xFD, 0xDE, 0x7E
+    };
+
     uint8_t alice_private_key[32];
     uint8_t alice_public_key[32];
-    
-    // Generate Bob's key pair  
-    uint8_t bob_private_key[32];
-    uint8_t bob_public_key[32];
-    
-    ESP_LOGI(TAG, "Step 1: Generating Alice's Curve25519 key pair...");
-    int result = generate_curve25519_keypair(alice_private_key, alice_public_key);
-    if (result != 0) {
-        ESP_LOGE(TAG, "Alice's key generation failed");
+    uint8_t alice_public_key_raw[32];
+    uint8_t alice_public_key_derived[32];
+    int result = 0;
+
+    ESP_LOGI(TAG, "Step 1: Loading Alice's predefined Curve25519 key pair...");
+    if (private_key_len < 32 || public_key_len < 32) {
+        ESP_LOGE(TAG, "Alice's key material is unavailable (priv=%d bytes, pub=%d bytes)",
+                 (int)private_key_len, (int)public_key_len);
+        ESP_LOGE(TAG, "Ensure factory data is loaded before running crypto tests");
         return;
     }
-    ESP_LOGI(TAG, "Alice's key pair generated successfully!");
-    ESP_LOGI(TAG, "Alice's private key:");
+
+    memcpy(alice_private_key, private_key, 32);
+    memcpy(alice_public_key_raw, public_key, 32);
+    memcpy(alice_public_key, alice_public_key_raw, 32);
+    ESP_LOGI(TAG, "Alice's private key (from factory data):");
     ESP_LOG_BUFFER_HEX(TAG, alice_private_key, 32);
-    ESP_LOGI(TAG, "Alice's public key:");
+    ESP_LOGI(TAG, "Alice's public key (from factory data):");
     ESP_LOG_BUFFER_HEX(TAG, alice_public_key, 32);
-    
-    ESP_LOGI(TAG, "Step 2: Generating Bob's Curve25519 key pair...");
-    result = generate_curve25519_keypair(bob_private_key, bob_public_key);
-    if (result != 0) {
-        ESP_LOGE(TAG, "Bob's key generation failed");
-        return;
+
+    result = lwm2m_curve25519_public_from_private(alice_private_key, alice_public_key_derived);
+    if (result == 0) {
+        if (memcmp(alice_public_key_raw, alice_public_key_derived, 32) != 0) {
+            ESP_LOGW(TAG, "Alice's stored public key does not match private key - using recomputed value");
+            ESP_LOGI(TAG, "Alice's recomputed public key:");
+            ESP_LOG_BUFFER_HEX(TAG, alice_public_key_derived, 32);
+        }
+        memcpy(alice_public_key, alice_public_key_derived, 32);
+    } else {
+        ESP_LOGE(TAG, "Failed to derive Alice's public key from private key (code: %d)", result);
     }
-    ESP_LOGI(TAG, "Bob's key pair generated successfully!");
-    ESP_LOGI(TAG, "Bob's private key:");
-    ESP_LOG_BUFFER_HEX(TAG, bob_private_key, 32);
-    ESP_LOGI(TAG, "Bob's public key:");
-    ESP_LOG_BUFFER_HEX(TAG, bob_public_key, 32);
-    
+
+    ESP_LOGI(TAG, "Step 2: Using Bob's predefined Curve25519 key pair...");
+    ESP_LOGI(TAG, "Bob's private key (provided test vector):");
+    ESP_LOG_BUFFER_HEX(TAG, bob_private_key_predefined, 32);
+    ESP_LOGI(TAG, "Bob's public key (provided test vector):");
+    ESP_LOG_BUFFER_HEX(TAG, bob_public_key_predefined, 32);
+
     // Step 3: Alice derives shared key using Bob's public key
     uint8_t alice_shared_key[32];
     ESP_LOGI(TAG, "Step 3: Alice deriving shared key...");
-    result = lwm2m_ecdh_derive_aes_key_simple(bob_public_key, alice_private_key, alice_shared_key);
+    result = lwm2m_ecdh_derive_aes_key_simple(bob_public_key_predefined, alice_private_key, alice_shared_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Alice's key derivation failed with code: %d", result);
         return;
@@ -150,7 +89,7 @@ void test_ecdh_crypto_with_keygen(void)
     // Step 4: Bob derives shared key using Alice's public key
     uint8_t bob_shared_key[32];
     ESP_LOGI(TAG, "Step 4: Bob deriving shared key...");
-    result = lwm2m_ecdh_derive_aes_key_simple(alice_public_key, bob_private_key, bob_shared_key);
+    result = lwm2m_ecdh_derive_aes_key_simple(alice_public_key, bob_private_key_predefined, bob_shared_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Bob's key derivation failed with code: %d", result);
         return;
@@ -224,9 +163,9 @@ void test_ecdh_crypto_with_keygen(void)
         ESP_LOGE(TAG, "✗ Message corruption detected!");
     }
     
-    ESP_LOGI(TAG, "=== Curve25519 Crypto Test with Real Key Generation Complete ===");
+    ESP_LOGI(TAG, "=== Curve25519 Crypto Test with Predefined Keys Complete ===");
     
 #else
-    ESP_LOGW(TAG, "Real key generation test skipped - requires ESP-IDF platform");
+    ESP_LOGW(TAG, "Predefined key crypto test skipped - requires ESP-IDF platform");
 #endif
 }

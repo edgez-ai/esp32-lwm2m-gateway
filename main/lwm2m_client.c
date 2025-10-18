@@ -34,6 +34,10 @@ uint8_t public_key[64] = {0};
 uint8_t private_key[64] = {0};
 size_t public_key_len = 0;
 size_t private_key_len = 0;
+char pinCode[32] = {0};
+char psk_key[64] = {0};
+char server[128] = {0};
+
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
@@ -62,7 +66,7 @@ static void save_security_info_to_rtc(const char *uri, const char *identity, siz
  *  - pinCode left empty (not present in factory data)
  * If factory partition not found or invalid, returns error and leaves buffers unchanged.
  */
-static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_key, size_t psk_sz, char *server, size_t server_sz)
+esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_key, size_t psk_sz, char *server, size_t server_sz)
 {
     if (!pinCode || !psk_key || !server) return ESP_ERR_INVALID_ARG;
     lwm2m_FactoryPartition fp; bool valid = false;
@@ -127,11 +131,6 @@ static esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_
 
 static void client_task(void *pvParameters)
 {
-    char pinCode[32] = {0};
-    char psk_key[64] = {0};
-    char server[128] = {0};
-    read_factory_and_parse(pinCode, sizeof(pinCode), psk_key, sizeof(psk_key), server, sizeof(server));
-
     char LWM2M_SERVER_URI[160] = {0};
     char resolved_ip[64] = {0};
     struct in_addr addr;

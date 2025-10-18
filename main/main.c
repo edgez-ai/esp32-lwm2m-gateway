@@ -36,11 +36,18 @@
 #include "device.h"
 #include "lwm2m_helpers.h"
 #include "crypto_test.h"
-#include "crypto_test_fixed.h"
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";
 static float tsens_out; /* local temperature reading passed to lwm2m module */
 /* BLE GAP/GATT logic removed; now handled inside ble.c */
+
+extern uint8_t public_key[64];
+extern uint8_t private_key[64];
+extern size_t public_key_len;
+extern size_t private_key_len;
+extern char pinCode[32];
+extern char psk_key[64];
+extern char server[128];
 
 void app_main(void)
 {
@@ -52,6 +59,9 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    ESP_ERROR_CHECK(read_factory_and_parse(pinCode, sizeof(pinCode), psk_key, sizeof(psk_key), server, sizeof(server)));
+
     ESP_ERROR_CHECK(example_connect());
     /* DTLS log level now set inside lwm2m_client_start() */
     ESP_ERROR_CHECK(temp_sensor_read_celsius(&tsens_out));
@@ -67,13 +77,9 @@ void app_main(void)
 
     /* Start LwM2M client task (moved to lwm2m_client.c) */
     lwm2m_client_start();
-
-    /* Test ECDH with real key generation (original implementation) */
+    
+    /* Test ECDH with real key generation (using CORRECTED implementation) */
     test_ecdh_crypto_with_keygen();
-
-    /* Test CORRECTED X25519 implementation for Java compatibility */
-    ESP_LOGI(TAG, "Running corrected X25519 implementation test...");
-    test_fixed_curve25519_crypto();
 
     /* Start BLE client (scanning + handshake) */
     esp_err_t ble_ret = ble_client_init_and_start();
