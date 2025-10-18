@@ -37,7 +37,6 @@ void test_ecdh_crypto_with_keygen(void)
 
     uint8_t alice_private_key[32];
     uint8_t alice_public_key[32];
-    uint8_t alice_public_key_raw[32];
     uint8_t alice_public_key_derived[32];
     int result = 0;
 
@@ -49,22 +48,21 @@ void test_ecdh_crypto_with_keygen(void)
         return;
     }
 
-    memcpy(alice_private_key, private_key, 32);
-    memcpy(alice_public_key_raw, public_key, 32);
-    memcpy(alice_public_key, alice_public_key_raw, 32);
+    memcpy(alice_private_key, private_key, sizeof(alice_private_key));
+    memcpy(alice_public_key, public_key, sizeof(alice_public_key));
     ESP_LOGI(TAG, "Alice's private key (from factory data):");
-    ESP_LOG_BUFFER_HEX(TAG, alice_private_key, 32);
+    ESP_LOG_BUFFER_HEX(TAG, alice_private_key, sizeof(alice_private_key));
     ESP_LOGI(TAG, "Alice's public key (from factory data):");
-    ESP_LOG_BUFFER_HEX(TAG, alice_public_key, 32);
+    ESP_LOG_BUFFER_HEX(TAG, alice_public_key, sizeof(alice_public_key));
 
     result = lwm2m_curve25519_public_from_private(alice_private_key, alice_public_key_derived);
     if (result == 0) {
-        if (memcmp(alice_public_key_raw, alice_public_key_derived, 32) != 0) {
+        if (memcmp(alice_public_key, alice_public_key_derived, sizeof(alice_public_key)) != 0) {
             ESP_LOGW(TAG, "Alice's stored public key does not match private key - using recomputed value");
             ESP_LOGI(TAG, "Alice's recomputed public key:");
-            ESP_LOG_BUFFER_HEX(TAG, alice_public_key_derived, 32);
+            ESP_LOG_BUFFER_HEX(TAG, alice_public_key_derived, sizeof(alice_public_key_derived));
         }
-        memcpy(alice_public_key, alice_public_key_derived, 32);
+        memcpy(alice_public_key, alice_public_key_derived, sizeof(alice_public_key));
     } else {
         ESP_LOGE(TAG, "Failed to derive Alice's public key from private key (code: %d)", result);
     }
@@ -78,24 +76,24 @@ void test_ecdh_crypto_with_keygen(void)
     // Step 3: Alice derives shared key using Bob's public key
     uint8_t alice_shared_key[32];
     ESP_LOGI(TAG, "Step 3: Alice deriving shared key...");
-    result = lwm2m_ecdh_derive_aes_key_simple(bob_public_key_predefined, alice_private_key, alice_shared_key);
+    result = lwm2m_crypto_curve25519_shared_key(bob_public_key_predefined, alice_private_key, alice_shared_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Alice's key derivation failed with code: %d", result);
         return;
     }
     ESP_LOGI(TAG, "Alice's shared key:");
-    ESP_LOG_BUFFER_HEX(TAG, alice_shared_key, 32);
+    ESP_LOG_BUFFER_HEX(TAG, alice_shared_key, sizeof(alice_shared_key));
     
     // Step 4: Bob derives shared key using Alice's public key
     uint8_t bob_shared_key[32];
     ESP_LOGI(TAG, "Step 4: Bob deriving shared key...");
-    result = lwm2m_ecdh_derive_aes_key_simple(alice_public_key, bob_private_key_predefined, bob_shared_key);
+    result = lwm2m_crypto_curve25519_shared_key(alice_public_key, bob_private_key_predefined, bob_shared_key);
     if (result != 0) {
         ESP_LOGE(TAG, "Bob's key derivation failed with code: %d", result);
         return;
     }
     ESP_LOGI(TAG, "Bob's shared key:");
-    ESP_LOG_BUFFER_HEX(TAG, bob_shared_key, 32);
+    ESP_LOG_BUFFER_HEX(TAG, bob_shared_key, sizeof(bob_shared_key));
     
     // Step 5: Verify both parties derived the same key
     if (memcmp(alice_shared_key, bob_shared_key, 32) == 0) {
@@ -117,16 +115,11 @@ void test_ecdh_crypto_with_keygen(void)
     size_t message_len = strlen(alice_message);
     
     // Alice encrypts message to Bob
-    result = lwm2m_chacha20_generate_nonce(nonce);
-    if (result != 0) {
-        ESP_LOGE(TAG, "Nonce generation failed");
-        return;
-    }
-    
-    result = lwm2m_chacha20_poly1305_encrypt(
-        alice_shared_key, nonce,
+    result = lwm2m_crypto_encrypt_with_shared_key(
+        alice_shared_key,
         (const uint8_t *)alice_message, message_len,
         (const uint8_t *)device_info, strlen(device_info),
+        nonce,
         ciphertext, tag
     );
     
@@ -142,7 +135,7 @@ void test_ecdh_crypto_with_keygen(void)
     
     // Bob decrypts message from Alice
     memset(plaintext, 0, sizeof(plaintext));
-    result = lwm2m_chacha20_poly1305_decrypt(
+    result = lwm2m_crypto_decrypt_with_shared_key(
         bob_shared_key, nonce,
         ciphertext, message_len,
         (const uint8_t *)device_info, strlen(device_info),
