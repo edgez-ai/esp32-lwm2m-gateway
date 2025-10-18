@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -226,17 +227,11 @@ static pending_challenge_t* find_pending_challenge(uint32_t serial)
 static uint32_t generate_challenge_nonce32(void)
 {
     uint32_t nonce32 = 0;
-    uint8_t nonce_bytes[12] = {0};
 
-    if (lwm2m_chacha20_generate_nonce(nonce_bytes) == 0) {
-        memcpy(&nonce32, nonce_bytes, sizeof(nonce32));
-    }
+    do {
+        nonce32 = esp_random();
+    } while (nonce32 == 0);
 
-    if (nonce32 == 0) {
-        do {
-            nonce32 = esp_random();
-        } while (nonce32 == 0);
-    }
 
     return nonce32;
 }
@@ -573,10 +568,9 @@ static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_le
     }
 
     uint8_t nonce12[12] = {0};
-    nonce12[8]  = (uint8_t)((nonce32 >> 0) & 0xFF);
-    nonce12[9]  = (uint8_t)((nonce32 >> 8) & 0xFF);
-    nonce12[10] = (uint8_t)((nonce32 >> 16) & 0xFF);
-    nonce12[11] = (uint8_t)((nonce32 >> 24) & 0xFF);
+    char nonce_str[13];
+    snprintf(nonce_str, sizeof(nonce_str), "%012" PRIu32, nonce32);
+    memcpy(nonce12, nonce_str, sizeof(nonce12));
 
     const uint8_t *ciphertext = in;
     const uint8_t *tag = in + ciphertext_len;
