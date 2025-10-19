@@ -467,12 +467,52 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
                 return false;
             }
 
-            int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+            /* Construct message as: serial_string + device_public_key (like Java) */
+            char serial_str[32];
+            snprintf(serial_str, sizeof(serial_str), "%ld", sender_serial);
+            size_t serial_len = strlen(serial_str);
+            
+            /* Allocate buffer for full message */
+            size_t full_msg_len = serial_len + answer.public_key.size;
+            uint8_t *full_message = malloc(full_msg_len);
+            int verify_ret = -1;
+            
+            if (full_message) {
+                memcpy(full_message, serial_str, serial_len);
+                memcpy(full_message + serial_len, answer.public_key.bytes, answer.public_key.size);
+                
+                ESP_LOGI(LOG_TAG, "Verifying signature with message: '%s' + device_key (%u bytes total)", 
+                         serial_str, (unsigned)full_msg_len);
+                
+                verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+                                                            sizeof(vendor_public_key),
+                                                            full_message,
+                                                            full_msg_len,
+                                                            decrypted_signature,
+                                                            decrypted_len);
+                free(full_message);
+                
+                if (verify_ret != 0) {
+                    ESP_LOGW(LOG_TAG, "Serial+key verification failed, trying device key only...");
+                    
+                    verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+                                                                sizeof(vendor_public_key),
+                                                                answer.public_key.bytes,
+                                                                answer.public_key.size,
+                                                                decrypted_signature,
+                                                                decrypted_len);
+                }
+            } else {
+                ESP_LOGE(LOG_TAG, "Failed to allocate memory for full message, trying device key only...");
+                
+                verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
                                                             sizeof(vendor_public_key),
                                                             answer.public_key.bytes,
                                                             answer.public_key.size,
                                                             decrypted_signature,
                                                             decrypted_len);
+            }
+            
             memset(decrypted_signature, 0, decrypted_len);
 
             if (verify_ret != 0) {
