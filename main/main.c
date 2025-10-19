@@ -36,6 +36,11 @@
 #include "device.h"
 #include "lwm2m_helpers.h"
 #include "crypto_test.h"
+
+#include "liblwm2m.h"
+#include "lwm2mclient.h"
+extern lwm2m_object_t *objArray[5];
+
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";
 static float tsens_out; /* local temperature reading passed to lwm2m module */
@@ -55,7 +60,7 @@ void app_main(void)
     temp_sensor_config_t temp_sensor = TSENS_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(temp_sensor_set_config(temp_sensor));
     ESP_ERROR_CHECK(temp_sensor_start());
-
+    objArray[2] = get_object_device();
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

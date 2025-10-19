@@ -17,6 +17,7 @@
 #include "dtls_debug.h"
 #include "object_vendor.h"
 #include "flash.h"
+#include "device.h"
 
 /* Keep RTC persisted data across deep sleep resets */
 RTC_DATA_ATTR char rtc_lwm2m_server_uri[128] = {0};
@@ -38,7 +39,7 @@ size_t private_key_len = 0;
 char pinCode[32] = {0};
 char psk_key[64] = {0};
 char server[128] = {0};
-
+static lwm2m_object_t *objArray[5] = {0};
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
@@ -155,7 +156,7 @@ static void client_task(void *pvParameters)
     snprintf(LWM2M_SERVER_URI, sizeof(LWM2M_SERVER_URI), "coaps://%s:5685", resolved_ip);
     ESP_LOGI(TAG, "Resolved server hostname: %s %s", resolved_ip, LWM2M_SERVER_URI);
 
-    lwm2m_object_t *objArray[5] = {0};
+
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     struct timeval now; gettimeofday(&now, NULL);
     int sleep_time_ms = (now.tv_sec - sleep_enter_time.tv_sec) * 1000 + (now.tv_usec - sleep_enter_time.tv_usec) / 1000;
@@ -190,6 +191,18 @@ static void client_task(void *pvParameters)
     objArray[2] = get_object_device();
     objArray[3] = get_vendor_object();
     objArray[4] = get_test_object();
+
+    device_add_instance(objArray[2], 0);
+    device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
+
+
+    for (uint32_t i = 0; i < device_ring_buffer_get_count(); i++) {
+        lwm2m_LwM2MDevice *device = device_ring_buffer_get_by_index(i);
+        device_add_instance(objArray[2], i+1);
+        char serial_str[11]; // 10 digits + null terminator
+        sprintf(serial_str, "%010lu", device->serial);
+        device_update_instance_string(objArray[2], i+1, 2, serial_str); // Set Power Source to Battery
+    }
 
     client_data.sock = create_socket(LOCAL_PORT, client_data.addressFamily);
     if (client_data.sock < 0) {

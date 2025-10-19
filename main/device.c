@@ -8,7 +8,9 @@
 #include "flash.h"
 #include "esp_log.h"
 #include <string.h>
-
+#include "liblwm2m.h"
+#include "lwm2mclient.h"
+extern lwm2m_object_t *objArray[5];
 static const char *TAG = "DEVICE_RING_BUFFER";
 
 /* Global ring buffer instance */
@@ -80,6 +82,11 @@ esp_err_t device_ring_buffer_add(const lwm2m_LwM2MDevice *device)
         ESP_LOGI(TAG, "Device data saved to flash");
     }
 
+    device_add_instance(objArray[2], g_device_buffer.count-1);
+
+    char serial_str[11]; // 10 digits + null terminator
+    sprintf(serial_str, "%010lu", device->serial);
+    device_update_instance_string(objArray[2], g_device_buffer.count - 1, 2, serial_str); // Set Power Source to Battery
     return ESP_OK;
 }
 
