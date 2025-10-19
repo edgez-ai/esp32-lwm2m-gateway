@@ -32,6 +32,7 @@ static float s_temperature_c = 0.0f; /* updated via public setter */
 char serialNumber[64] = {0};
 uint8_t public_key[64] = {0};
 uint8_t private_key[64] = {0};
+uint8_t vendor_public_key[32] = {0};
 size_t public_key_len = 0;
 size_t private_key_len = 0;
 char pinCode[32] = {0};
@@ -80,6 +81,7 @@ esp_err_t read_factory_and_parse(char *pinCode, size_t pin_sz, char *psk_key, si
          Example: model=0x1A, serial=123 -> "1A0000000123" */
     memcpy(serialNumber, fp.serial, sizeof(serialNumber) - 1);
     memcpy(public_key, fp.public_key.bytes, fp.public_key.size > sizeof(public_key) ? sizeof(public_key) : fp.public_key.size);
+    memcpy(vendor_public_key, fp.signature_cert.bytes, fp.signature_cert.size > sizeof(vendor_public_key) ? sizeof(vendor_public_key) : fp.signature_cert.size);
     public_key_len = fp.public_key.size;
     memcpy(private_key, fp.private_key.bytes, fp.private_key.size > sizeof(private_key) ? sizeof(private_key) : fp.private_key.size);
     private_key_len = fp.private_key.size;

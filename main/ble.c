@@ -87,6 +87,8 @@ extern size_t public_key_len;
 extern uint8_t private_key[64];
 extern size_t private_key_len;
 
+extern uint8_t vendor_public_key[32];
+
 /* ChaCha20-Poly1305 decryption (forward declarations) */
 static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
                                                  uint8_t *out, size_t out_cap,
@@ -451,9 +453,35 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
             size_t decrypted_len = answer.signature.size - 16; // Remove tag length
             ESP_LOGI(LOG_TAG, "Successfully decrypted signature (%u bytes)", (unsigned)decrypted_len);
             ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, decrypted_signature, decrypted_len, ESP_LOG_INFO);
-            
-            // TODO: Verify the decrypted signature matches expected factory signature
-            // For now, we consider successful decryption as verification
+
+            if (answer.public_key.size != 32) {
+                ESP_LOGE(LOG_TAG, "Unexpected public key length %u in challenge answer",
+                         (unsigned)answer.public_key.size);
+                memset(decrypted_signature, 0, decrypted_len);
+                return false;
+            }
+
+            if (decrypted_len != 64) {
+                ESP_LOGE(LOG_TAG, "Unexpected factory signature length: %u", (unsigned)decrypted_len);
+                memset(decrypted_signature, 0, decrypted_len);
+                return false;
+            }
+
+            int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+                                                            sizeof(vendor_public_key),
+                                                            answer.public_key.bytes,
+                                                            answer.public_key.size,
+                                                            decrypted_signature,
+                                                            decrypted_len);
+            memset(decrypted_signature, 0, decrypted_len);
+
+            if (verify_ret != 0) {
+                ESP_LOGE(LOG_TAG, "Factory signature verification failed for serial %ld (err=%d)",
+                         sender_serial, verify_ret);
+                return false;
+            }
+
+            ESP_LOGI(LOG_TAG, "Factory signature verified for serial %ld", sender_serial);
             verification_success = true;
         } else {
             ESP_LOGE(LOG_TAG, "Failed to decrypt signature for device serial %ld", sender_serial);
