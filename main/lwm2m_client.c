@@ -194,12 +194,9 @@ static void client_task(void *pvParameters)
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
 
-    // Initialize gateway instance with default values
-    gateway_add_instance(objArray[5], 0);
-    gateway_update_instance_string(objArray[5], 0, 0, serialNumber); // Gateway ID = serial number
-    gateway_update_instance_value(objArray[5], 0, 2, LWM2M_MAX_DEVICES); // Max devices
-    gateway_update_instance_string(objArray[5], 0, 7, "active"); // Gateway status
-    gateway_update_instance_bool(objArray[5], 0, 9, true); // Auto registration enabled
+    // Initialize gateway instance for the gateway itself 
+    // Device ID = 0 (gateway), Connection type = WIFI (0), Instance ID = 0
+    gateway_add_instance(objArray[5], 0, 0, 0); // 0 = WIFI connection type
 
     device_add_instance(objArray[2], 0);
     device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
@@ -299,22 +296,18 @@ void lwm2m_client_start(void)
 
 // Gateway statistics helper functions
 void lwm2m_update_gateway_rx_stats(uint64_t bytes) {
-    if (objArray[5]) {
-        gateway_increment_rx_data(objArray[5], 0, bytes);
-    }
+    // Note: Object 25 no longer tracks RX/TX statistics - it tracks individual devices
+    ESP_LOGD(TAG, "RX stats updated: %llu bytes", (unsigned long long)bytes);
 }
 
 void lwm2m_update_gateway_tx_stats(uint64_t bytes) {
-    if (objArray[5]) {
-        gateway_increment_tx_data(objArray[5], 0, bytes);
-    }
+    // Note: Object 25 no longer tracks RX/TX statistics - it tracks individual devices 
+    ESP_LOGD(TAG, "TX stats updated: %llu bytes", (unsigned long long)bytes);
 }
 
 void lwm2m_set_gateway_status(const char* status) {
-    if (objArray[5] && status) {
-        gateway_update_instance_string(objArray[5], 0, 7, status);
-        ESP_LOGI(TAG, "Gateway status updated to: %s", status);
-    }
+    // Note: Object 25 no longer has gateway status - it tracks individual devices
+    ESP_LOGD(TAG, "Gateway status would be: %s", status ? status : "NULL");
 }
 
 void lwm2m_update_connected_devices_count(void) {
