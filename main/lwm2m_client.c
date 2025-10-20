@@ -16,6 +16,7 @@
 #include "dtlsconnection.h"
 #include "dtls_debug.h"
 #include "object_vendor.h"
+#include "object_gateway.h"
 #include "flash.h"
 #include "device.h"
 
@@ -39,7 +40,7 @@ size_t private_key_len = 0;
 char pinCode[32] = {0};
 char psk_key[64] = {0};
 char server[128] = {0};
-static lwm2m_object_t *objArray[5] = {0};
+static lwm2m_object_t *objArray[6] = {0};  // Expanded for gateway object
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
@@ -191,18 +192,33 @@ static void client_task(void *pvParameters)
     objArray[2] = get_object_device();
     objArray[3] = get_vendor_object();
     objArray[4] = get_test_object();
+    objArray[5] = get_object_gateway();  // Add gateway object
+
+    // Initialize gateway instance with default values
+    gateway_add_instance(objArray[5], 0);
+    gateway_update_instance_string(objArray[5], 0, 0, serialNumber); // Gateway ID = serial number
+    gateway_update_instance_value(objArray[5], 0, 2, LWM2M_MAX_DEVICES); // Max devices
+    gateway_update_instance_string(objArray[5], 0, 7, "active"); // Gateway status
+    gateway_update_instance_bool(objArray[5], 0, 9, true); // Auto registration enabled
 
     device_add_instance(objArray[2], 0);
     device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
 
 
-    for (uint32_t i = 0; i < device_ring_buffer_get_count(); i++) {
+    // Initialize device instances from device ring buffer
+    uint32_t device_count = device_ring_buffer_get_count();
+    for (uint32_t i = 0; i < device_count; i++) {
         lwm2m_LwM2MDevice *device = device_ring_buffer_get_by_index(i);
         device_add_instance(objArray[2], i+1);
         char serial_str[11]; // 10 digits + null terminator
         sprintf(serial_str, "%010lu", device->serial);
         device_update_instance_string(objArray[2], i+1, 2, serial_str); // Set Power Source to Battery
     }
+
+    // Update gateway connected devices count
+    gateway_update_instance_value(objArray[5], 0, 1, device_count);
+    
+    ESP_LOGI(TAG, "Gateway Object 25 initialized with %ld connected devices", device_count);
 
     client_data.sock = create_socket(LOCAL_PORT, client_data.addressFamily);
     if (client_data.sock < 0) {
@@ -218,7 +234,7 @@ static void client_task(void *pvParameters)
         vTaskDelete(NULL); return;
     }
     client_data.lwm2mH = client_handle;
-    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 5, objArray) != 0) {
+    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 6, objArray) != 0) {
         ESP_LOGE(TAG, "lwm2m_configure failed");
         vTaskDelete(NULL); return;
     }
@@ -277,6 +293,41 @@ void lwm2m_client_set_temperature(float temp_celsius)
 void lwm2m_client_start(void)
 {
     /* Configure DTLS logging before client task starts */
- //   dtls_set_log_level(DTLS_LOG_DEBUG);
+    dtls_set_log_level(DTLS_LOG_DEBUG);
     xTaskCreate(client_task, "client_lwm2m", 8192, NULL, 5, NULL);
+}
+
+// Gateway statistics helper functions
+void lwm2m_update_gateway_rx_stats(uint64_t bytes) {
+    if (objArray[5]) {
+        gateway_increment_rx_data(objArray[5], 0, bytes);
+    }
+}
+
+void lwm2m_update_gateway_tx_stats(uint64_t bytes) {
+    if (objArray[5]) {
+        gateway_increment_tx_data(objArray[5], 0, bytes);
+    }
+}
+
+void lwm2m_set_gateway_status(const char* status) {
+    if (objArray[5] && status) {
+        gateway_update_instance_string(objArray[5], 0, 7, status);
+        ESP_LOGI(TAG, "Gateway status updated to: %s", status);
+    }
+}
+
+void lwm2m_update_connected_devices_count(void) {
+    if (objArray[5]) {
+        uint32_t device_count = device_ring_buffer_get_count();
+        gateway_update_instance_value(objArray[5], 0, 1, device_count);
+        ESP_LOGI(TAG, "Gateway connected devices count updated to: %ld", device_count);
+    }
+}
+
+void lwm2m_update_active_sessions(int32_t session_count) {
+    if (objArray[5]) {
+        gateway_update_instance_value(objArray[5], 0, 3, session_count);
+        ESP_LOGI(TAG, "Gateway active sessions updated to: %ld", session_count);
+    }
 }

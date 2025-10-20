@@ -39,7 +39,7 @@
 
 #include "liblwm2m.h"
 #include "lwm2mclient.h"
-extern lwm2m_object_t *objArray[5];
+extern lwm2m_object_t *objArray[6];
 
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";

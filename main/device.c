@@ -10,7 +10,8 @@
 #include <string.h>
 #include "liblwm2m.h"
 #include "lwm2mclient.h"
-extern lwm2m_object_t *objArray[5];
+#include "object_gateway.h"
+extern lwm2m_object_t *objArray[6];
 static const char *TAG = "DEVICE_RING_BUFFER";
 
 /* Global ring buffer instance */
@@ -87,6 +88,13 @@ esp_err_t device_ring_buffer_add(const lwm2m_LwM2MDevice *device)
     char serial_str[11]; // 10 digits + null terminator
     sprintf(serial_str, "%010lu", device->serial);
     device_update_instance_string(objArray[2], g_device_buffer.count - 1, 2, serial_str); // Set Power Source to Battery
+    
+    // Update gateway connected devices count
+    if (objArray[5]) {
+        gateway_update_instance_value(objArray[5], 0, 1, g_device_buffer.count);
+        ESP_LOGI(TAG, "Updated gateway connected devices count to %ld", g_device_buffer.count);
+    }
+    
     return ESP_OK;
 }
 
@@ -180,6 +188,12 @@ esp_err_t device_ring_buffer_remove_by_serial(uint32_t serial)
             }
 
             ESP_LOGI(TAG, "Removed device with serial %ld (count: %ld)", serial, g_device_buffer.count);
+            
+            // Update gateway connected devices count
+            if (objArray[5]) {
+                gateway_update_instance_value(objArray[5], 0, 1, g_device_buffer.count);
+                ESP_LOGI(TAG, "Updated gateway connected devices count to %ld", g_device_buffer.count);
+            }
             
             /* Save to flash after removing device */
             esp_err_t save_err = device_ring_buffer_save_to_flash();
@@ -367,4 +381,14 @@ esp_err_t device_ring_buffer_load_from_flash(void)
 esp_err_t device_ring_buffer_clear_flash(void)
 {
     return flash_device_data_clear();
+}
+
+/* Sync gateway statistics with current device count */
+void device_ring_buffer_sync_gateway_stats(void)
+{
+    if (objArray[5]) {
+        uint32_t device_count = device_ring_buffer_get_count();
+        gateway_update_instance_value(objArray[5], 0, 1, device_count);
+        ESP_LOGI(TAG, "Synced gateway device count: %ld", device_count);
+    }
 }

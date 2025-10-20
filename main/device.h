@@ -76,6 +76,9 @@ esp_err_t device_ring_buffer_load_from_flash(void);
 /* Clear device data from flash */
 esp_err_t device_ring_buffer_clear_flash(void);
 
+/* Sync gateway statistics with current device count */
+void device_ring_buffer_sync_gateway_stats(void);
+
 #ifdef __cplusplus
 }
 #endif
