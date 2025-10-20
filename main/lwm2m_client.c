@@ -194,28 +194,29 @@ static void client_task(void *pvParameters)
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
 
-    // Initialize gateway instance for the gateway itself 
-    // Device ID = 0 (gateway), Connection type = WIFI (0), Instance ID = 0
-    gateway_add_instance(objArray[5], 0, 0, 0); // 0 = WIFI connection type
-
     device_add_instance(objArray[2], 0);
     device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
 
-
-    // Initialize device instances from device ring buffer
+    // Initialize Object 25 instances from device ring buffer
     uint32_t device_count = device_ring_buffer_get_count();
     for (uint32_t i = 0; i < device_count; i++) {
         lwm2m_LwM2MDevice *device = device_ring_buffer_get_by_index(i);
+        
+        // Create Device Object instance (Object 3)
         device_add_instance(objArray[2], i+1);
         char serial_str[11]; // 10 digits + null terminator
         sprintf(serial_str, "%010lu", device->serial);
         device_update_instance_string(objArray[2], i+1, 2, serial_str); // Set Power Source to Battery
+        
+        // Create Object 25 instance for each device
+        // Use device->serial as device_id, device->instance_id as instanceId
+        // Assume BLE connection type since devices come through BLE
+        gateway_add_instance(objArray[5], (uint16_t)device->instance_id, device->serial, CONNECTION_BLE);
+        
+        ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu", device->instance_id, device->serial);
     }
-
-    // Update gateway connected devices count
-    gateway_update_instance_value(objArray[5], 0, 1, device_count);
     
-    ESP_LOGI(TAG, "Gateway Object 25 initialized with %ld connected devices", device_count);
+    ESP_LOGI(TAG, "Object 25 initialized with %ld device instances", device_count);
 
     client_data.sock = create_socket(LOCAL_PORT, client_data.addressFamily);
     if (client_data.sock < 0) {
@@ -311,16 +312,17 @@ void lwm2m_set_gateway_status(const char* status) {
 }
 
 void lwm2m_update_connected_devices_count(void) {
+    // Object 25 now represents individual devices, not gateway-level counts
+    // Each device gets its own instance based on protobuf device data
     if (objArray[5]) {
         uint32_t device_count = device_ring_buffer_get_count();
-        gateway_update_instance_value(objArray[5], 0, 1, device_count);
-        ESP_LOGI(TAG, "Gateway connected devices count updated to: %ld", device_count);
+        ESP_LOGI(TAG, "Total devices in ring buffer: %ld", device_count);
+        // TODO: Update/add/remove Object 25 instances when devices change
     }
 }
 
 void lwm2m_update_active_sessions(int32_t session_count) {
-    if (objArray[5]) {
-        gateway_update_instance_value(objArray[5], 0, 3, session_count);
-        ESP_LOGI(TAG, "Gateway active sessions updated to: %ld", session_count);
-    }
+    // Object 25 no longer tracks gateway-level session counts
+    // Each device instance can have its online status updated individually
+    ESP_LOGI(TAG, "Active sessions: %ld (Object 25 tracks individual device status)", session_count);
 }
