@@ -44,6 +44,9 @@ static lwm2m_object_t *objArray[6] = {0};  // Expanded for gateway object
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
+// Forward declaration of callback function
+static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id);
+
 /* Internal helpers */
 static void save_security_info_to_rtc(const char *uri, const char *identity, size_t identity_len, const char *psk, size_t psk_len)
 {
@@ -194,6 +197,9 @@ static void client_task(void *pvParameters)
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
 
+    // Set up the callback for gateway object to update device ring buffer
+    gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
+
     device_add_instance(objArray[2], 0);
     device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
 
@@ -340,5 +346,28 @@ void lwm2m_trigger_registration_update(void) {
     } else {
         ESP_LOGW(TAG, "Cannot trigger registration update - client not ready (state: %d)", 
                  client_data.lwm2mH ? client_data.lwm2mH->state : -1);
+    }
+}
+
+// Callback function for gateway object to update device instance_id
+static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id)
+{
+    ESP_LOGI(TAG, "Gateway callback: Updating device %u with new instance_id %u", device_id, new_instance_id);
+    
+    // Find the corresponding device in ring buffer using device_id (serial)
+    lwm2m_LwM2MDevice *device = device_ring_buffer_find_by_serial(device_id);
+    if (device != NULL) {
+        // Update the device's instance_id in the ring buffer
+        device->instance_id = new_instance_id;
+        
+        // Save the updated device ring buffer to flash
+        esp_err_t save_err = device_ring_buffer_save_to_flash();
+        if (save_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to save device ring buffer: %s", esp_err_to_name(save_err));
+        } else {
+            ESP_LOGI(TAG, "Device ring buffer updated and saved for device serial %u", device_id);
+        }
+    } else {
+        ESP_LOGW(TAG, "Warning: Device with serial %u not found in ring buffer", device_id);
     }
 }
