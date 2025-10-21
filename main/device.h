@@ -58,11 +58,6 @@ device_ring_buffer_t* device_ring_buffer_get_handle(void);
 /* Print device buffer status for debugging */
 void device_ring_buffer_print_status(void);
 
-/* Utility: Create a device structure from basic parameters */
-esp_err_t device_create(lwm2m_LwM2MDevice *device, int32_t model, uint32_t serial, 
-                       const uint8_t *public_key, size_t pub_key_len,
-                       const uint8_t *aes_key, int32_t instance_id, bool banned);
-
 /* Persistence functions */
 /* Initialize device data persistence */
 esp_err_t device_ring_buffer_init_with_persistence(void);

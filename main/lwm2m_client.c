@@ -211,8 +211,9 @@ static void client_task(void *pvParameters)
         // Create Object 25 instance for each device
         // Use device->serial as device_id, device->instance_id as instanceId
         // Assume BLE connection type since devices come through BLE
-        gateway_add_instance(objArray[5], (uint16_t)device->instance_id, device->serial, CONNECTION_BLE);
-        
+        if (device->instance_id <= 0) {
+            gateway_add_instance(objArray[5], i, device->serial, CONNECTION_BLE);
+        }
         ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu", device->instance_id, device->serial);
     }
     
@@ -325,4 +326,19 @@ void lwm2m_update_active_sessions(int32_t session_count) {
     // Object 25 no longer tracks gateway-level session counts
     // Each device instance can have its online status updated individually
     ESP_LOGI(TAG, "Active sessions: %ld (Object 25 tracks individual device status)", session_count);
+}
+
+void lwm2m_trigger_registration_update(void) {
+    if (client_data.lwm2mH && client_data.lwm2mH->state == STATE_READY) {
+        ESP_LOGI(TAG, "Triggering registration update due to object changes");
+        int res = lwm2m_update_registration(client_data.lwm2mH, 0, true);
+        if (res != COAP_NO_ERROR) {
+            ESP_LOGW(TAG, "Registration update failed with error: %d", res);
+        } else {
+            ESP_LOGI(TAG, "Registration update triggered successfully");
+        }
+    } else {
+        ESP_LOGW(TAG, "Cannot trigger registration update - client not ready (state: %d)", 
+                 client_data.lwm2mH ? client_data.lwm2mH->state : -1);
+    }
 }

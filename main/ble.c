@@ -31,6 +31,13 @@
 
 #include "ble.h"
 #include "device.h"
+#include "lwm2m_client.h"
+
+/* Include LwM2M gateway object definitions */
+#include "../components/wakaama/examples/client/object_gateway.h"
+
+/* External declarations for lwm2m objects */
+extern lwm2m_object_t *objArray[6];
 
 
 /* Conditional minimal crypto support: provide stubs if mbedTLS components not enabled. */
@@ -543,7 +550,7 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     lwm2m_LwM2MDevice new_device = {0};
     new_device.model = pending->model;
     new_device.serial = pending->serial;
-    new_device.instance_id = -1;  // Will be assigned during bootstrap
+    new_device.instance_id = 0;  // Will be assigned during bootstrap
     new_device.banned = false;
     
     // TODO: Properly implement MAC address storage (requires pb_callback implementation)
@@ -562,6 +569,17 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     if (err == ESP_OK) {
         ESP_LOGI(LOG_TAG, "Successfully added challenged device with serial %ld to device list", sender_serial);
         remove_pending_challenge(sender_serial);
+        
+        // If LwM2M client is initialized, add the gateway instance and notify server
+        if (objArray[5] != NULL) {
+            uint32_t device_count = device_ring_buffer_get_count();
+            gateway_add_instance(objArray[5], device_count - 1, new_device.serial, CONNECTION_BLE);
+            // Trigger registration update to notify LwM2M server about the new device
+            lwm2m_trigger_registration_update();
+            ESP_LOGI(LOG_TAG, "Added device instance to LwM2M gateway object and triggered registration update");
+        } else {
+            ESP_LOGI(LOG_TAG, "Device added to ring buffer. LwM2M gateway object will pick it up during initialization");
+        }
         return true;
     } else {
         ESP_LOGE(LOG_TAG, "Failed to add challenged device with serial %ld to device list: %s", 

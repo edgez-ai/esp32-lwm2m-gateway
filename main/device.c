@@ -286,44 +286,6 @@ void device_ring_buffer_print_status(void)
     }
 }
 
-/* Utility: Create a device structure from basic parameters */
-esp_err_t device_create(lwm2m_LwM2MDevice *device, int32_t model, uint32_t serial, 
-                       const uint8_t *public_key, size_t pub_key_len,
-                       const uint8_t *aes_key, int32_t instance_id, bool banned)
-{
-    if (device == NULL) {
-        ESP_LOGE(TAG, "Device pointer is NULL");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // Clear the device structure
-    memset(device, 0, sizeof(lwm2m_LwM2MDevice));
-
-    // Set basic fields
-    device->model = model;
-    device->serial = serial;
-    device->instance_id = instance_id;
-    device->banned = banned;
-
-    // Copy public key if provided
-    if (public_key != NULL && pub_key_len > 0) {
-        size_t copy_len = (pub_key_len > sizeof(device->public_key.bytes)) ? 
-                          sizeof(device->public_key.bytes) : pub_key_len;
-        memcpy(device->public_key.bytes, public_key, copy_len);
-        device->public_key.size = copy_len;
-    }
-
-    // Copy AES key if provided
-    if (aes_key != NULL) {
-        memcpy(device->aes_key, aes_key, sizeof(device->aes_key));
-    }
-
-    ESP_LOGI(TAG, "Created device: Model=%ld, Serial=%ld, Instance=%ld, Banned=%s",
-             model, serial, instance_id, banned ? "Yes" : "No");
-
-    return ESP_OK;
-}
-
 /* ---- Persistence functions ---- */
 
 esp_err_t device_ring_buffer_init_with_persistence(void)

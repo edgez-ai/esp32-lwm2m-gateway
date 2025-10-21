@@ -17,3 +17,6 @@ void lwm2m_update_gateway_tx_stats(uint64_t bytes);
 void lwm2m_set_gateway_status(const char* status);
 void lwm2m_update_connected_devices_count(void);
 void lwm2m_update_active_sessions(int32_t session_count);
+
+/* Trigger registration update to notify server of changes */
+void lwm2m_trigger_registration_update(void);
