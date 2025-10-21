@@ -197,8 +197,9 @@ static void client_task(void *pvParameters)
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
 
-    // Set up the callback for gateway object to update device ring buffer
+    // Set up the callbacks for gateway object
     gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
+    gateway_set_registration_update_callback(objArray[5], lwm2m_trigger_registration_update);
 
     device_add_instance(objArray[2], 0);
     device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
@@ -209,11 +210,11 @@ static void client_task(void *pvParameters)
         lwm2m_LwM2MDevice *device = device_ring_buffer_get_by_index(i);
         
         // Create Device Object instance (Object 3)
-        device_add_instance(objArray[2], i+1);
+        device_add_instance(objArray[2], device->instance_id);
         char serial_str[11]; // 10 digits + null terminator
         sprintf(serial_str, "%010lu", device->serial);
-        device_update_instance_string(objArray[2], i+1, 2, serial_str); // Set Power Source to Battery
-        
+        device_update_instance_string(objArray[2], device->instance_id, 2, serial_str); // Set Power Source to Battery
+
         // Create Object 25 instance for each device
         // Use device->serial as device_id, device->instance_id as instanceId
         // Assume BLE connection type since devices come through BLE
