@@ -17,6 +17,11 @@
 #include "dtls_debug.h"
 #include "object_vendor.h"
 #include "object_gateway.h"
+#include "object_wot_thing.h"
+#include "object_wot_data_feature.h"
+#include "object_wot_action.h"
+#include "object_wot_event.h"
+#include "wot_bootstrap_config.h"
 #include "flash.h"
 #include "device.h"
 
@@ -40,9 +45,10 @@ size_t private_key_len = 0;
 char pinCode[32] = {0};
 char psk_key[64] = {0};
 char server[128] = {0};
-static lwm2m_object_t *objArray[6] = {0};  // Expanded for gateway object
+static lwm2m_object_t *objArray[10] = {0};  // Expanded for WoT objects
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
+static wot_objects_t *wot_objects = NULL;  // WoT objects container
 
 // Forward declaration of callback function
 static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id);
@@ -197,6 +203,35 @@ static void client_task(void *pvParameters)
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
 
+    // Initialize W3C WoT objects
+    wot_objects = wot_bootstrap_init_objects();
+    if (wot_objects != NULL) {
+        objArray[6] = wot_objects->wot_thing_obj;         // Object 26250
+        objArray[7] = wot_objects->wot_data_feature_obj;  // Object 26251
+        objArray[8] = wot_objects->wot_action_obj;        // Object 26252
+        objArray[9] = wot_objects->wot_event_obj;         // Object 26253
+        
+        // Apply default WoT configuration
+        wot_bootstrap_config_t* wot_config = wot_bootstrap_create_default_config();
+        if (wot_config != NULL) {
+            uint8_t result = wot_bootstrap_apply_config(wot_objects, wot_config);
+            if (result == COAP_204_CHANGED) {
+                ESP_LOGI(TAG, "WoT bootstrap configuration applied successfully");
+            } else {
+                ESP_LOGW(TAG, "Failed to apply WoT bootstrap configuration: %d", result);
+            }
+            wot_bootstrap_free_config(wot_config);
+        }
+        
+        ESP_LOGI(TAG, "W3C WoT objects initialized and configured");
+    } else {
+        ESP_LOGW(TAG, "Failed to initialize W3C WoT objects, continuing without them");
+        objArray[6] = NULL;
+        objArray[7] = NULL;
+        objArray[8] = NULL;
+        objArray[9] = NULL;
+    }
+
     // Set up the callbacks for gateway object
     gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
     gateway_set_registration_update_callback(objArray[5], lwm2m_trigger_registration_update);
@@ -240,7 +275,7 @@ static void client_task(void *pvParameters)
         vTaskDelete(NULL); return;
     }
     client_data.lwm2mH = client_handle;
-    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 6, objArray) != 0) {
+    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 10, objArray) != 0) {
         ESP_LOGE(TAG, "lwm2m_configure failed");
         vTaskDelete(NULL); return;
     }
@@ -288,6 +323,13 @@ static void client_task(void *pvParameters)
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    
+    // Cleanup WoT objects before task deletion
+    if (wot_objects != NULL) {
+        wot_bootstrap_free_objects(wot_objects);
+        wot_objects = NULL;
+    }
+    
     vTaskDelete(NULL);
 }
 
