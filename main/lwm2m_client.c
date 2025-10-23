@@ -49,9 +49,151 @@ static lwm2m_object_t *objArray[10] = {0};  // Expanded for WoT objects
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 static wot_objects_t *wot_objects = NULL;  // WoT objects container
+static bool wot_model_printed = false;  // Flag to print WoT model only once
 
 // Forward declaration of callback function
 static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id);
+
+// Function to print WoT Things model
+static void print_wot_things_model(void)
+{
+    ESP_LOGI(TAG, "==================== W3C WoT THINGS MODEL ====================");
+    
+    if (wot_objects == NULL || wot_objects->wot_thing_obj == NULL) {
+        ESP_LOGW(TAG, "WoT objects not initialized");
+        return;
+    }
+    
+    lwm2m_object_t *thing_obj = wot_objects->wot_thing_obj;
+    wot_thing_instance_t *thing_instance = (wot_thing_instance_t *)thing_obj->instanceList;
+    
+    if (thing_instance == NULL) {
+        ESP_LOGI(TAG, "No WoT Thing instances found");
+        return;
+    }
+    
+    // Print each Thing instance
+    while (thing_instance != NULL) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "Thing Instance ID: %d", thing_instance->instanceId);
+        ESP_LOGI(TAG, "  Identifier: %s", thing_instance->thing_identifier);
+        ESP_LOGI(TAG, "  Title: %s", thing_instance->title);
+        ESP_LOGI(TAG, "  Description: %s", thing_instance->description);
+        ESP_LOGI(TAG, "  Version: %s", thing_instance->version);
+        ESP_LOGI(TAG, "  Last Updated: %ld", (long)thing_instance->last_updated);
+        
+        // Print Property References
+        if (thing_instance->property_refs_count > 0) {
+            ESP_LOGI(TAG, "  Property References (%d):", thing_instance->property_refs_count);
+            for (int i = 0; i < thing_instance->property_refs_count; i++) {
+                if (thing_instance->property_refs[i].type == LWM2M_TYPE_OBJECT_LINK) {
+                    uint16_t obj_id = thing_instance->property_refs[i].value.asObjLink.objectId;
+                    uint16_t inst_id = thing_instance->property_refs[i].value.asObjLink.objectInstanceId;
+                    ESP_LOGI(TAG, "    [%d] Object %d, Instance %d", i, obj_id, inst_id);
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "  Property References: None");
+        }
+        
+        // Print Action References
+        if (thing_instance->action_refs_count > 0) {
+            ESP_LOGI(TAG, "  Action References (%d):", thing_instance->action_refs_count);
+            for (int i = 0; i < thing_instance->action_refs_count; i++) {
+                if (thing_instance->action_refs[i].type == LWM2M_TYPE_OBJECT_LINK) {
+                    uint16_t obj_id = thing_instance->action_refs[i].value.asObjLink.objectId;
+                    uint16_t inst_id = thing_instance->action_refs[i].value.asObjLink.objectInstanceId;
+                    ESP_LOGI(TAG, "    [%d] Object %d, Instance %d", i, obj_id, inst_id);
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "  Action References: None");
+        }
+        
+        // Print Event References
+        if (thing_instance->event_refs_count > 0) {
+            ESP_LOGI(TAG, "  Event References (%d):", thing_instance->event_refs_count);
+            for (int i = 0; i < thing_instance->event_refs_count; i++) {
+                if (thing_instance->event_refs[i].type == LWM2M_TYPE_OBJECT_LINK) {
+                    uint16_t obj_id = thing_instance->event_refs[i].value.asObjLink.objectId;
+                    uint16_t inst_id = thing_instance->event_refs[i].value.asObjLink.objectInstanceId;
+                    ESP_LOGI(TAG, "    [%d] Object %d, Instance %d", i, obj_id, inst_id);
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "  Event References: None");
+        }
+        
+        thing_instance = thing_instance->next;
+    }
+    
+    // Print Data Features
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Data Features (Object 26251):");
+    if (wot_objects->wot_data_feature_obj && wot_objects->wot_data_feature_obj->instanceList) {
+        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)wot_objects->wot_data_feature_obj->instanceList;
+        while (feature_instance != NULL) {
+            ESP_LOGI(TAG, "  Instance %d: %s", feature_instance->instanceId, feature_instance->feature_identifier);
+            ESP_LOGI(TAG, "    Linked Resources: %d", feature_instance->linked_resources_count);
+            for (int i = 0; i < feature_instance->linked_resources_count; i++) {
+                ESP_LOGI(TAG, "      [%d] %s", i, feature_instance->linked_resources[i]);
+            }
+            if (feature_instance->has_owning_thing) {
+                ESP_LOGI(TAG, "    Owning Thing: Object %d, Instance %d", 
+                         feature_instance->owning_thing_obj_id, feature_instance->owning_thing_instance_id);
+            } else {
+                ESP_LOGI(TAG, "    Owning Thing: None");
+            }
+            feature_instance = feature_instance->next;
+        }
+    } else {
+        ESP_LOGI(TAG, "  No Data Feature instances");
+    }
+    
+    // Print Actions
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Actions (Object 26252):");
+    if (wot_objects->wot_action_obj && wot_objects->wot_action_obj->instanceList) {
+        wot_action_instance_t *action_instance = (wot_action_instance_t *)wot_objects->wot_action_obj->instanceList;
+        while (action_instance != NULL) {
+            ESP_LOGI(TAG, "  Instance %d: %s", action_instance->instanceId, action_instance->action_identifier);
+            ESP_LOGI(TAG, "    Script Size: %zu bytes", action_instance->script_size);
+            ESP_LOGI(TAG, "    Script Format: %s", action_instance->script_format);
+            if (action_instance->has_owning_thing) {
+                ESP_LOGI(TAG, "    Owning Thing: Object %d, Instance %d", 
+                         action_instance->owning_thing_obj_id, action_instance->owning_thing_instance_id);
+            } else {
+                ESP_LOGI(TAG, "    Owning Thing: None");
+            }
+            action_instance = action_instance->next;
+        }
+    } else {
+        ESP_LOGI(TAG, "  No Action instances");
+    }
+    
+    // Print Events
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Events (Object 26253):");
+    if (wot_objects->wot_event_obj && wot_objects->wot_event_obj->instanceList) {
+        wot_event_instance_t *event_instance = (wot_event_instance_t *)wot_objects->wot_event_obj->instanceList;
+        while (event_instance != NULL) {
+            ESP_LOGI(TAG, "  Instance %d: %s", event_instance->instanceId, event_instance->event_identifier);
+            ESP_LOGI(TAG, "    Script Size: %zu bytes", event_instance->script_size);
+            ESP_LOGI(TAG, "    Script Format: %s", event_instance->script_format);
+            if (event_instance->has_owning_thing) {
+                ESP_LOGI(TAG, "    Owning Thing: Object %d, Instance %d", 
+                         event_instance->owning_thing_obj_id, event_instance->owning_thing_instance_id);
+            } else {
+                ESP_LOGI(TAG, "    Owning Thing: None");
+            }
+            event_instance = event_instance->next;
+        }
+    } else {
+        ESP_LOGI(TAG, "  No Event instances");
+    }
+    
+    ESP_LOGI(TAG, "===============================================================");
+}
 
 /* Internal helpers */
 static void save_security_info_to_rtc(const char *uri, const char *identity, size_t identity_len, const char *psk, size_t psk_len)
@@ -294,6 +436,12 @@ static void client_task(void *pvParameters)
             connection_handle_packet(client_data.connList, rx_buffer, len);
             inactivity_counter = 0;
         } else if (client_handle->state == STATE_READY) {
+            // Print WoT Things model once when client becomes ready
+            if (!wot_model_printed) {
+                print_wot_things_model();
+                wot_model_printed = true;
+            }
+            
             inactivity_counter++;
             test_data_t *device_data = (test_data_t *)objArray[4]->userData;
             if (device_data->test_integer != (int)s_temperature_c) {
