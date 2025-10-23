@@ -48,7 +48,6 @@ char server[128] = {0};
 static lwm2m_object_t *objArray[10] = {0};  // Expanded for WoT objects
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
-static wot_objects_t *wot_objects = NULL;  // WoT objects container
 static bool wot_model_printed = false;  // Flag to print WoT model only once
 
 // Forward declaration of callback function
@@ -59,12 +58,12 @@ static void print_wot_things_model(void)
 {
     ESP_LOGI(TAG, "==================== W3C WoT THINGS MODEL ====================");
     
-    if (wot_objects == NULL || wot_objects->wot_thing_obj == NULL) {
+    if (objArray[6] == NULL) {
         ESP_LOGW(TAG, "WoT objects not initialized");
         return;
     }
     
-    lwm2m_object_t *thing_obj = wot_objects->wot_thing_obj;
+    lwm2m_object_t *thing_obj = objArray[6];  // WoT Thing object
     wot_thing_instance_t *thing_instance = (wot_thing_instance_t *)thing_obj->instanceList;
     
     if (thing_instance == NULL) {
@@ -129,9 +128,9 @@ static void print_wot_things_model(void)
     
     // Print Data Features
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Data Features (Object 26251):");
-    if (wot_objects->wot_data_feature_obj && wot_objects->wot_data_feature_obj->instanceList) {
-        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)wot_objects->wot_data_feature_obj->instanceList;
+    ESP_LOGI(TAG, "Data Features (Object %u):", objArray[7] ? objArray[7]->objID : 0);
+    if (objArray[7] && objArray[7]->instanceList) {
+        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)objArray[7]->instanceList;
         while (feature_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", feature_instance->instanceId, feature_instance->feature_identifier);
             ESP_LOGI(TAG, "    Linked Resources: %d", feature_instance->linked_resources_count);
@@ -152,9 +151,9 @@ static void print_wot_things_model(void)
     
     // Print Actions
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Actions (Object 26252):");
-    if (wot_objects->wot_action_obj && wot_objects->wot_action_obj->instanceList) {
-        wot_action_instance_t *action_instance = (wot_action_instance_t *)wot_objects->wot_action_obj->instanceList;
+    ESP_LOGI(TAG, "Actions (Object %u):", objArray[8] ? objArray[8]->objID : 0);
+    if (objArray[8] && objArray[8]->instanceList) {
+        wot_action_instance_t *action_instance = (wot_action_instance_t *)objArray[8]->instanceList;
         while (action_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", action_instance->instanceId, action_instance->action_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", action_instance->script_size);
@@ -173,9 +172,9 @@ static void print_wot_things_model(void)
     
     // Print Events
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Events (Object 26253):");
-    if (wot_objects->wot_event_obj && wot_objects->wot_event_obj->instanceList) {
-        wot_event_instance_t *event_instance = (wot_event_instance_t *)wot_objects->wot_event_obj->instanceList;
+    ESP_LOGI(TAG, "Events (Object %u):", objArray[9] ? objArray[9]->objID : 0);
+    if (objArray[9] && objArray[9]->instanceList) {
+        wot_event_instance_t *event_instance = (wot_event_instance_t *)objArray[9]->instanceList;
         while (event_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", event_instance->instanceId, event_instance->event_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", event_instance->script_size);
@@ -346,34 +345,37 @@ static void client_task(void *pvParameters)
     objArray[5] = get_object_gateway();  // Add gateway object
 
     // Initialize W3C WoT objects
-    wot_objects = wot_bootstrap_init_objects();
-    if (wot_objects != NULL) {
-        objArray[6] = wot_objects->wot_thing_obj;         // Object 26250
-        objArray[7] = wot_objects->wot_data_feature_obj;  // Object 26251
-        objArray[8] = wot_objects->wot_action_obj;        // Object 26252
-        objArray[9] = wot_objects->wot_event_obj;         // Object 26253
+    objArray[6] = get_object_wot_thing();         // Object 26250
+    objArray[7] = get_object_wot_data_feature();  // Object 26251
+    objArray[8] = get_object_wot_action();        // Object 26252
+    objArray[9] = get_object_wot_event();         // Object 26253
+    
+    // Apply default WoT configuration if objects were created successfully
+    if (objArray[6] && objArray[7] && objArray[8] && objArray[9]) {
+        // Create a temporary wot_objects structure for configuration
+        wot_objects_t temp_wot_objects = {
+            .wot_thing_obj = objArray[6],
+            .wot_data_feature_obj = objArray[7],
+            .wot_action_obj = objArray[8],
+            .wot_event_obj = objArray[9]
+        };
         
-        // Apply default WoT configuration
         wot_bootstrap_config_t* wot_config = wot_bootstrap_create_default_config();
         if (wot_config != NULL) {
-            uint8_t result = wot_bootstrap_apply_config(wot_objects, wot_config);
+            uint8_t result = wot_bootstrap_apply_config(&temp_wot_objects, wot_config);
             if (result == COAP_204_CHANGED) {
-                ESP_LOGI(TAG, "WoT bootstrap configuration applied successfully");
+                ESP_LOGI(TAG, "WoT default configuration applied successfully");
             } else {
-                ESP_LOGW(TAG, "Failed to apply WoT bootstrap configuration: %d", result);
+                ESP_LOGW(TAG, "Failed to apply WoT default configuration: %d", result);
             }
             wot_bootstrap_free_config(wot_config);
         }
         
-        ESP_LOGI(TAG, "W3C WoT objects initialized and configured");
+        ESP_LOGI(TAG, "W3C WoT objects initialized with default configuration");
     } else {
-        ESP_LOGW(TAG, "Failed to initialize W3C WoT objects, continuing without them");
-        objArray[6] = NULL;
-        objArray[7] = NULL;
-        objArray[8] = NULL;
-        objArray[9] = NULL;
+        ESP_LOGW(TAG, "Failed to initialize some W3C WoT objects");
     }
-
+    
     // Set up the callbacks for gateway object
     gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
     gateway_set_registration_update_callback(objArray[5], lwm2m_trigger_registration_update);
@@ -421,6 +423,14 @@ static void client_task(void *pvParameters)
         ESP_LOGE(TAG, "lwm2m_configure failed");
         vTaskDelete(NULL); return;
     }
+    
+    ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - WoT Objects configured:");
+    ESP_LOGI(TAG, "🔽   Object 26250 (WoT Thing): %s", objArray[6] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26251 (WoT Data Feature): %s", objArray[7] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26252 (WoT Action): %s", objArray[8] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26253 (WoT Event): %s", objArray[9] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - Client ready to receive bootstrap commands...");
+    
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
         ESP_LOGI(TAG, "Restored LwM2M client state to STATE_READY");
     }
@@ -429,6 +439,13 @@ static void client_task(void *pvParameters)
     while (1) {
         time_t tv = lwm2m_gettime();
         lwm2m_step(client_handle, &tv);
+
+        // Log state changes for bootstrap debugging
+        static lwm2m_client_state_t last_state = STATE_INITIAL;
+        if (client_handle->state != last_state) {
+            ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - Client state changed: %d -> %d", last_state, client_handle->state);
+            last_state = client_handle->state;
+        }
 
         struct sockaddr_storage source_addr; socklen_t socklen = sizeof(source_addr);
         int len = recvfrom(client_data.sock, rx_buffer, sizeof(rx_buffer), 0, (struct sockaddr *)&source_addr, &socklen);
@@ -470,12 +487,6 @@ static void client_task(void *pvParameters)
             inactivity_counter = 0; /* after wake */
         }
         vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    
-    // Cleanup WoT objects before task deletion
-    if (wot_objects != NULL) {
-        wot_bootstrap_free_objects(wot_objects);
-        wot_objects = NULL;
     }
     
     vTaskDelete(NULL);
