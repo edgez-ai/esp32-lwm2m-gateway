@@ -407,12 +407,26 @@ static void client_task(void *pvParameters)
                  i, device->serial, device->instance_id);
 
         // Create Connectivity Monitoring (Object 4) instance for each device
-        connectivity_moni_add_instance(objArray[6], device->instance_id, device->serial);
-        ESP_LOGI(TAG, "Added Object 4 (Connectivity Monitoring) instance %d for device serial %lu", 
-                 device->instance_id, device->serial);
+        if (objArray[6] != NULL) {
+            uint8_t conn_result = connectivity_moni_add_instance(objArray[6], device->instance_id, device->serial);
+            if (conn_result == COAP_201_CREATED || conn_result == COAP_204_CHANGED) {
+                ESP_LOGI(TAG, "Added Object 4 (Connectivity Monitoring) instance %d for device serial %lu", 
+                         device->instance_id, device->serial);
+            } else {
+                ESP_LOGE(TAG, "Failed to add Object 4 instance %d for device serial %lu (result: %u)", 
+                         device->instance_id, device->serial, conn_result);
+            }
+        } else {
+            ESP_LOGE(TAG, "Connectivity Monitoring object (Object 4) not available");
+        }
     }
     
     ESP_LOGI(TAG, "Object 25 initialized with %ld device instances", device_count);
+    
+    // Debug: Print all connectivity monitoring instances
+    if (objArray[6] != NULL) {
+        connectivity_moni_debug_instances(objArray[6]);
+    }
 
     client_data.sock = create_socket(LOCAL_PORT, client_data.addressFamily);
     if (client_data.sock < 0) {
@@ -562,28 +576,42 @@ void lwm2m_trigger_registration_update(void) {
 }
 
 void lwm2m_update_device_rssi(uint16_t instance_id, int rssi) {
-    if (objArray[6]) {  // Connectivity Monitoring object
+    if (objArray[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
         uint8_t result = connectivity_moni_update_rssi(objArray[6], instance_id, rssi);
         if (result == COAP_204_CHANGED) {
-            ESP_LOGI(TAG, "Updated RSSI for device instance %d to %d dBm", instance_id, rssi);
+            // Notify LwM2M framework that the RSSI value has changed to trigger observations
+            lwm2m_uri_t uri;
+            uri.objectId = 4;  // Connectivity Monitoring object ID
+            uri.instanceId = instance_id;
+            uri.resourceId = 2;  // Radio Signal Strength resource ID
+            
+            lwm2m_resource_value_changed(client_data.lwm2mH, &uri);
+            ESP_LOGI(TAG, "Updated RSSI for device instance %d to %d dBm and notified observers", instance_id, rssi);
         } else {
             ESP_LOGW(TAG, "Failed to update RSSI for device instance %d: error %d", instance_id, result);
         }
     } else {
-        ESP_LOGW(TAG, "Connectivity Monitoring object not available");
+        ESP_LOGW(TAG, "Connectivity Monitoring object or LwM2M context not available");
     }
 }
 
 void lwm2m_update_device_link_quality(uint16_t instance_id, int link_quality) {
-    if (objArray[6]) {  // Connectivity Monitoring object
+    if (objArray[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
         uint8_t result = connectivity_moni_update_link_quality(objArray[6], instance_id, link_quality);
         if (result == COAP_204_CHANGED) {
-            ESP_LOGI(TAG, "Updated link quality for device instance %d to %d%%", instance_id, link_quality);
+            // Notify LwM2M framework that the Link Quality value has changed to trigger observations
+            lwm2m_uri_t uri;
+            uri.objectId = 4;  // Connectivity Monitoring object ID
+            uri.instanceId = instance_id;
+            uri.resourceId = 3;  // Link Quality resource ID
+            
+            lwm2m_resource_value_changed(client_data.lwm2mH, &uri);
+            ESP_LOGI(TAG, "Updated link quality for device instance %d to %d%% and notified observers", instance_id, link_quality);
         } else {
             ESP_LOGW(TAG, "Failed to update link quality for device instance %d: error %d", instance_id, result);
         }
     } else {
-        ESP_LOGW(TAG, "Connectivity Monitoring object not available");
+        ESP_LOGW(TAG, "Connectivity Monitoring object or LwM2M context not available");
     }
 }
 
@@ -600,16 +628,51 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
         device->instance_id = new_instance_id;
         
         // Update connectivity monitoring instance if needed
-        if (objArray[6] != NULL && old_instance_id != new_instance_id) {
-            // Remove old connectivity monitoring instance if it existed
-            if (old_instance_id != 0) {
-                connectivity_moni_remove_instance(objArray[6], old_instance_id);
-                ESP_LOGI(TAG, "Removed old connectivity monitoring instance %u", old_instance_id);
+        if (objArray[6] != NULL) {
+            ESP_LOGI(TAG, "Updating connectivity monitoring: old_id=%u, new_id=%u", old_instance_id, new_instance_id);
+            
+            // Always try to remove old instance if it's different (and not 0 which is reserved for gateway)
+            if (old_instance_id != new_instance_id && old_instance_id != 0) {
+                uint8_t remove_result = connectivity_moni_remove_instance(objArray[6], old_instance_id);
+                if (remove_result == COAP_202_DELETED) {
+                    ESP_LOGI(TAG, "Removed old connectivity monitoring instance %u", old_instance_id);
+                } else {
+                    ESP_LOGW(TAG, "Failed to remove old connectivity monitoring instance %u (result: %u)", old_instance_id, remove_result);
+                }
             }
             
             // Add new connectivity monitoring instance with the correct instance_id
-            connectivity_moni_add_instance(objArray[6], new_instance_id, device_id);
-            ESP_LOGI(TAG, "Added new connectivity monitoring instance %u for device serial %u", new_instance_id, device_id);
+            uint8_t add_result = connectivity_moni_add_instance(objArray[6], new_instance_id, device_id);
+            if (add_result == COAP_201_CREATED || add_result == COAP_204_CHANGED) {
+                ESP_LOGI(TAG, "Added/updated connectivity monitoring instance %u for device serial %u", new_instance_id, device_id);
+                
+                // Notify LwM2M framework about the new instance by triggering resource value changes
+                if (client_data.lwm2mH) {
+                    // Small delay to ensure instance is properly added to the LwM2M context
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    
+                    lwm2m_uri_t uri;
+                    uri.objectId = 4;  // Connectivity Monitoring object ID
+                    uri.instanceId = new_instance_id;
+                    uri.resourceId = 2;  // Radio Signal Strength resource ID
+                    
+                    lwm2m_resource_value_changed(client_data.lwm2mH, &uri);
+                    ESP_LOGI(TAG, "Notified LwM2M server about connectivity monitoring instance %u", new_instance_id);
+                    
+                    // Also notify about other resources to ensure proper registration
+                    uri.resourceId = 3;  // Link Quality
+                    lwm2m_resource_value_changed(client_data.lwm2mH, &uri);
+                    
+                    // Trigger registration update to notify server
+                    lwm2m_trigger_registration_update();
+                }
+            } else {
+                ESP_LOGE(TAG, "Failed to add connectivity monitoring instance %u for device serial %u (result: %u)", 
+                         new_instance_id, device_id, add_result);
+            }
+            
+            // Debug: Print all connectivity monitoring instances after update
+            connectivity_moni_debug_instances(objArray[6]);
         }
         
         // Save the updated device ring buffer to flash
