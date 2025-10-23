@@ -35,9 +35,10 @@
 
 /* Include LwM2M gateway object definitions */
 #include "../components/wakaama/examples/client/object_gateway.h"
+#include "lwm2mclient.h"
 
 /* External declarations for lwm2m objects */
-extern lwm2m_object_t *objArray[6];
+extern lwm2m_object_t *objArray[11];
 
 
 /* Conditional minimal crypto support: provide stubs if mbedTLS components not enabled. */
@@ -574,6 +575,14 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
         if (objArray[5] != NULL) {
             uint32_t device_count = device_ring_buffer_get_count();
             gateway_add_instance(objArray[5], device_count - 1, new_device.serial, CONNECTION_BLE);
+            
+            // Add connectivity monitoring instance for the new device (using instance_id when available)
+            if (objArray[6] != NULL) {
+                // For new devices, instance_id is 0 initially, so use device_count-1 as temporary instance_id
+                connectivity_moni_add_instance(objArray[6], device_count - 1, new_device.serial);
+                ESP_LOGI(LOG_TAG, "Added connectivity monitoring instance for new device serial %ld", new_device.serial);
+            }
+            
             // Trigger registration update to notify LwM2M server about the new device
             lwm2m_trigger_registration_update();
             ESP_LOGI(LOG_TAG, "Added device instance to LwM2M gateway object and triggered registration update");
@@ -759,6 +768,10 @@ static void process_lwm2m_message(const lwm2m_LwM2MMessage *message, const esp_b
     
     if (existing_device != NULL) {
         ESP_LOGI(LOG_TAG, "Device with serial %ld already exists in device list", message->serial);
+        
+        // Update connectivity monitoring RSSI for existing device
+        lwm2m_update_device_rssi(existing_device->instance_id, rssi);
+        
         // Device exists, optionally update last seen time or other fields
         // For now, we just log that it exists
     } else {

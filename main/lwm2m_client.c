@@ -45,7 +45,7 @@ size_t private_key_len = 0;
 char pinCode[32] = {0};
 char psk_key[64] = {0};
 char server[128] = {0};
-static lwm2m_object_t *objArray[10] = {0};  // Expanded for WoT objects
+static lwm2m_object_t *objArray[11] = {0};  // Expanded for WoT objects and connectivity monitoring
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 static bool wot_model_printed = false;  // Flag to print WoT model only once
@@ -58,12 +58,12 @@ static void print_wot_things_model(void)
 {
     ESP_LOGI(TAG, "==================== W3C WoT THINGS MODEL ====================");
     
-    if (objArray[6] == NULL) {
+    if (objArray[7] == NULL) {
         ESP_LOGW(TAG, "WoT objects not initialized");
         return;
     }
     
-    lwm2m_object_t *thing_obj = objArray[6];  // WoT Thing object
+    lwm2m_object_t *thing_obj = objArray[7];  // WoT Thing object
     wot_thing_instance_t *thing_instance = (wot_thing_instance_t *)thing_obj->instanceList;
     
     if (thing_instance == NULL) {
@@ -128,9 +128,9 @@ static void print_wot_things_model(void)
     
     // Print Data Features
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Data Features (Object %u):", objArray[7] ? objArray[7]->objID : 0);
-    if (objArray[7] && objArray[7]->instanceList) {
-        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)objArray[7]->instanceList;
+    ESP_LOGI(TAG, "Data Features (Object %u):", objArray[8] ? objArray[8]->objID : 0);
+    if (objArray[8] && objArray[8]->instanceList) {
+        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)objArray[8]->instanceList;
         while (feature_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", feature_instance->instanceId, feature_instance->feature_identifier);
             ESP_LOGI(TAG, "    Linked Resources: %d", feature_instance->linked_resources_count);
@@ -151,9 +151,9 @@ static void print_wot_things_model(void)
     
     // Print Actions
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Actions (Object %u):", objArray[8] ? objArray[8]->objID : 0);
-    if (objArray[8] && objArray[8]->instanceList) {
-        wot_action_instance_t *action_instance = (wot_action_instance_t *)objArray[8]->instanceList;
+    ESP_LOGI(TAG, "Actions (Object %u):", objArray[9] ? objArray[9]->objID : 0);
+    if (objArray[9] && objArray[9]->instanceList) {
+        wot_action_instance_t *action_instance = (wot_action_instance_t *)objArray[9]->instanceList;
         while (action_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", action_instance->instanceId, action_instance->action_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", action_instance->script_size);
@@ -172,9 +172,9 @@ static void print_wot_things_model(void)
     
     // Print Events
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Events (Object %u):", objArray[9] ? objArray[9]->objID : 0);
-    if (objArray[9] && objArray[9]->instanceList) {
-        wot_event_instance_t *event_instance = (wot_event_instance_t *)objArray[9]->instanceList;
+    ESP_LOGI(TAG, "Events (Object %u):", objArray[10] ? objArray[10]->objID : 0);
+    if (objArray[10] && objArray[10]->instanceList) {
+        wot_event_instance_t *event_instance = (wot_event_instance_t *)objArray[10]->instanceList;
         while (event_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", event_instance->instanceId, event_instance->event_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", event_instance->script_size);
@@ -343,21 +343,22 @@ static void client_task(void *pvParameters)
     objArray[3] = get_vendor_object();
     objArray[4] = get_test_object();
     objArray[5] = get_object_gateway();  // Add gateway object
+    objArray[6] = get_object_conn_m();   // Add connectivity monitoring object
 
     // Initialize W3C WoT objects
-    objArray[6] = get_object_wot_thing();         // Object 26250
-    objArray[7] = get_object_wot_data_feature();  // Object 26251
-    objArray[8] = get_object_wot_action();        // Object 26252
-    objArray[9] = get_object_wot_event();         // Object 26253
+    objArray[7] = get_object_wot_thing();         // Object 26250
+    objArray[8] = get_object_wot_data_feature();  // Object 26251
+    objArray[9] = get_object_wot_action();        // Object 26252
+    objArray[10] = get_object_wot_event();         // Object 26253
     
     // Apply default WoT configuration if objects were created successfully
-    if (objArray[6] && objArray[7] && objArray[8] && objArray[9]) {
+    if (objArray[7] && objArray[8] && objArray[9] && objArray[10]) {
         // Create a temporary wot_objects structure for configuration
         wot_objects_t temp_wot_objects = {
-            .wot_thing_obj = objArray[6],
-            .wot_data_feature_obj = objArray[7],
-            .wot_action_obj = objArray[8],
-            .wot_event_obj = objArray[9]
+            .wot_thing_obj = objArray[7],
+            .wot_data_feature_obj = objArray[8],
+            .wot_action_obj = objArray[9],
+            .wot_event_obj = objArray[10]
         };
         
         wot_bootstrap_config_t* wot_config = wot_bootstrap_create_default_config();
@@ -404,6 +405,11 @@ static void client_task(void *pvParameters)
         //}
         ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu (server_instance_id=%d)", 
                  i, device->serial, device->instance_id);
+
+        // Create Connectivity Monitoring (Object 4) instance for each device
+        connectivity_moni_add_instance(objArray[6], device->instance_id, device->serial);
+        ESP_LOGI(TAG, "Added Object 4 (Connectivity Monitoring) instance %d for device serial %lu", 
+                 device->instance_id, device->serial);
     }
     
     ESP_LOGI(TAG, "Object 25 initialized with %ld device instances", device_count);
@@ -422,16 +428,17 @@ static void client_task(void *pvParameters)
         vTaskDelete(NULL); return;
     }
     client_data.lwm2mH = client_handle;
-    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 10, objArray) != 0) {
+    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 11, objArray) != 0) {
         ESP_LOGE(TAG, "lwm2m_configure failed");
         vTaskDelete(NULL); return;
     }
     
     ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - WoT Objects configured:");
-    ESP_LOGI(TAG, "🔽   Object 26250 (WoT Thing): %s", objArray[6] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26251 (WoT Data Feature): %s", objArray[7] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26252 (WoT Action): %s", objArray[8] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26253 (WoT Event): %s", objArray[9] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 4 (Connectivity Monitoring): %s", objArray[6] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26250 (WoT Thing): %s", objArray[7] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26251 (WoT Data Feature): %s", objArray[8] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26252 (WoT Action): %s", objArray[9] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26253 (WoT Event): %s", objArray[10] ? "✅ Registered" : "❌ Failed");
     ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - Client ready to receive bootstrap commands...");
     
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
@@ -554,6 +561,32 @@ void lwm2m_trigger_registration_update(void) {
     }
 }
 
+void lwm2m_update_device_rssi(uint16_t instance_id, int rssi) {
+    if (objArray[6]) {  // Connectivity Monitoring object
+        uint8_t result = connectivity_moni_update_rssi(objArray[6], instance_id, rssi);
+        if (result == COAP_204_CHANGED) {
+            ESP_LOGI(TAG, "Updated RSSI for device instance %d to %d dBm", instance_id, rssi);
+        } else {
+            ESP_LOGW(TAG, "Failed to update RSSI for device instance %d: error %d", instance_id, result);
+        }
+    } else {
+        ESP_LOGW(TAG, "Connectivity Monitoring object not available");
+    }
+}
+
+void lwm2m_update_device_link_quality(uint16_t instance_id, int link_quality) {
+    if (objArray[6]) {  // Connectivity Monitoring object
+        uint8_t result = connectivity_moni_update_link_quality(objArray[6], instance_id, link_quality);
+        if (result == COAP_204_CHANGED) {
+            ESP_LOGI(TAG, "Updated link quality for device instance %d to %d%%", instance_id, link_quality);
+        } else {
+            ESP_LOGW(TAG, "Failed to update link quality for device instance %d: error %d", instance_id, result);
+        }
+    } else {
+        ESP_LOGW(TAG, "Connectivity Monitoring object not available");
+    }
+}
+
 // Callback function for gateway object to update device instance_id
 static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id)
 {
@@ -563,7 +596,21 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
     lwm2m_LwM2MDevice *device = device_ring_buffer_find_by_serial(device_id);
     if (device != NULL) {
         // Update the device's instance_id in the ring buffer
+        uint16_t old_instance_id = device->instance_id;
         device->instance_id = new_instance_id;
+        
+        // Update connectivity monitoring instance if needed
+        if (objArray[6] != NULL && old_instance_id != new_instance_id) {
+            // Remove old connectivity monitoring instance if it existed
+            if (old_instance_id != 0) {
+                connectivity_moni_remove_instance(objArray[6], old_instance_id);
+                ESP_LOGI(TAG, "Removed old connectivity monitoring instance %u", old_instance_id);
+            }
+            
+            // Add new connectivity monitoring instance with the correct instance_id
+            connectivity_moni_add_instance(objArray[6], new_instance_id, device_id);
+            ESP_LOGI(TAG, "Added new connectivity monitoring instance %u for device serial %u", new_instance_id, device_id);
+        }
         
         // Save the updated device ring buffer to flash
         esp_err_t save_err = device_ring_buffer_save_to_flash();

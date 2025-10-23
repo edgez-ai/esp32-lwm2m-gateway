@@ -20,3 +20,7 @@ void lwm2m_update_active_sessions(int32_t session_count);
 
 /* Trigger registration update to notify server of changes */
 void lwm2m_trigger_registration_update(void);
+
+/* Connectivity monitoring functions for updating device signal strength */
+void lwm2m_update_device_rssi(uint16_t instance_id, int rssi);
+void lwm2m_update_device_link_quality(uint16_t instance_id, int link_quality);
