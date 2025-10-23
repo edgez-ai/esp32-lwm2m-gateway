@@ -395,12 +395,15 @@ static void client_task(void *pvParameters)
         device_update_instance_string(objArray[2], device->instance_id, 2, serial_str); // Set Power Source to Battery
 
         // Create Object 25 instance for each device
-        // Use device->serial as device_id, device->instance_id as instanceId
+        // Use i as instanceId, device->serial as device_id, device->instance_id as server_instance_id
         // Assume BLE connection type since devices come through BLE
-        if (device->instance_id <= 0) {
-            gateway_add_instance(objArray[5], i, device->serial, CONNECTION_BLE);
-        }
-        ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu", device->instance_id, device->serial);
+        //if (device->instance_id <= 0) {
+        gateway_add_instance(objArray[5], i, device->serial, CONNECTION_BLE);
+        // Set the server_instance_id (resource 1) to device->instance_id
+        gateway_update_instance_value(objArray[5], i, 1, device->instance_id);
+        //}
+        ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu (server_instance_id=%d)", 
+                 i, device->serial, device->instance_id);
     }
     
     ESP_LOGI(TAG, "Object 25 initialized with %ld device instances", device_count);
