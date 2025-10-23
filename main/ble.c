@@ -750,9 +750,9 @@ static bool decode_lwm2m_message(const uint8_t *data, size_t data_len, lwm2m_LwM
     return true;
 }
 
-static void process_lwm2m_message(const lwm2m_LwM2MMessage *message, const esp_bd_addr_t addr, uint8_t addr_type)
+static void process_lwm2m_message(const lwm2m_LwM2MMessage *message, const esp_bd_addr_t addr, uint8_t addr_type, int8_t rssi)
 {
-    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - model: %ld, serial: %ld", message->model, message->serial);
+    ESP_LOGI(LOG_TAG, "LwM2M Message decoded - model: %ld, serial: %ld, RSSI: %d dBm", message->model, message->serial, rssi);
 
     // Check if device exists in the device list by serial number
     lwm2m_LwM2MDevice *existing_device = device_ring_buffer_find_by_serial(message->serial);
@@ -1122,12 +1122,13 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             }
             
             const uint8_t *adv_data = param->period_adv_report.params.data; size_t adv_len = param->period_adv_report.params.data_length;
+            int8_t rssi = param->period_adv_report.params.rssi;
             const uint8_t *protobuf_data = NULL; size_t protobuf_len = 0; uint16_t company_id = 0;
             if (extract_msd_payload(adv_data, adv_len, &protobuf_data, &protobuf_len, &company_id) && protobuf_data && protobuf_len) {
                 // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(protobuf_data, protobuf_len, &message)) {
-                    process_lwm2m_message(&message, sender_addr, sender_addr_type);
+                    process_lwm2m_message(&message, sender_addr, sender_addr_type, rssi);
                     break;
                 }
                 
@@ -1142,7 +1143,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 // First try to decode as LwM2MMessage (normal discovery messages)
                 lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
                 if (decode_lwm2m_message(svc_payload, svc_len, &message)) {
-                    process_lwm2m_message(&message, sender_addr, sender_addr_type);
+                    process_lwm2m_message(&message, sender_addr, sender_addr_type, rssi);
                     break;
                 }
                 
