@@ -94,16 +94,11 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
     }
 
-    /* Initialize and start LoRa module */
-    esp_err_t lora_ret = lora_init();
+    /* Start LoRa client (similar to BLE - scanning + handshake) */
+    esp_err_t lora_ret = lora_client_init_and_start();
     if (lora_ret != ESP_OK) {
-        ESP_LOGE(TAG, "LoRa init failed: %s", esp_err_to_name(lora_ret));
+        ESP_LOGE(TAG, "LoRa client init failed: %s", esp_err_to_name(lora_ret));
     } else {
-        lora_ret = lora_start_task();
-        if (lora_ret != ESP_OK) {
-            ESP_LOGE(TAG, "LoRa task start failed: %s", esp_err_to_name(lora_ret));
-        } else {
-            ESP_LOGI(TAG, "LoRa module initialized and task started successfully");
-        }
+        ESP_LOGI(TAG, "LoRa client initialized and started successfully");
     }
 }
