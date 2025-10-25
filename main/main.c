@@ -95,21 +95,28 @@ void lora_send_message_bin(const uint8_t *data, size_t len) {
     // For now, just log the data as hex and as string (if printable)
     ESP_LOGI(TAG, "lora_send_message_bin called with %d bytes", (int)len);
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
-    // Optionally, send as string if printable
-    bool is_printable = true;
-    for (size_t i = 0; i < len; i++) {
-        if (data[i] < 32 && data[i] != '\0' && data[i] != '\n' && data[i] != '\r') {
-            is_printable = false;
-            break;
-        }
-    }
-    if (is_printable && len > 0) {
-        char* str_copy = malloc(len + 1);
-        if (str_copy) {
-            memcpy(str_copy, data, len);
-            str_copy[len] = '\0';
-            lora_send_message(str_copy);
-            free(str_copy);
+
+    // Escape 0x00 as 0xFF 0x01 and 0xFF as 0xFF 0x02
+    if (len > 0) {
+        // Worst case: every byte is 0x00 or 0xFF, so max size is 2*len
+        size_t max_escaped_len = len * 2;
+        uint8_t* escaped = malloc(max_escaped_len + 1); // +1 for null terminator if needed
+        if (escaped) {
+            size_t j = 0;
+            for (size_t i = 0; i < len; i++) {
+                if (data[i] == 0x00) {
+                    escaped[j++] = 0xFF;
+                    escaped[j++] = 0x01;
+                } else if (data[i] == 0xFF) {
+                    escaped[j++] = 0xFF;
+                    escaped[j++] = 0x02;
+                } else {
+                    escaped[j++] = data[i];
+                }
+            }
+            escaped[j] = '\0'; // Null-terminate for string safety
+            lora_send_message((char*)escaped);
+            free(escaped);
         }
     }
     // Otherwise, just log (real implementation should send binary over LoRa)
