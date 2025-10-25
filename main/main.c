@@ -58,11 +58,36 @@ extern char server[128];
 
 // Add prototypes for external functions if not already included
 // These should match the actual signatures in ble.h and lora.h
-// Weak/test implementation for ble_get_challenge_message
+// Protobuf-based implementation for ble_get_challenge_message (matches ble.c logic)
+#include "pb_encode.h"
+#include "lwm2m.pb.h"
+#include <esp_random.h>
+
 void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
-    static const uint8_t test_msg[] = {0x0a, 0x04, 0xde, 0xad, 0xbe, 0xef}; // Example protobuf bytes
-    *buf = test_msg;
-    *len = sizeof(test_msg);
+    static uint8_t challenge_buf[128];
+    lwm2m_LwM2MDeviceChallenge challenge = lwm2m_LwM2MDeviceChallenge_init_zero;
+    // Generate a random 32-bit nonce (avoid zero)
+    uint32_t nonce = 0;
+    do {
+        nonce = esp_random();
+    } while (nonce == 0);
+    challenge.nounce = nonce;
+    // Copy public key
+    extern uint8_t public_key[64];
+    extern size_t public_key_len;
+    size_t pk_len = public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len;
+    memcpy(challenge.public_key.bytes, public_key, pk_len);
+    challenge.public_key.size = pk_len;
+
+    pb_ostream_t stream = pb_ostream_from_buffer(challenge_buf, sizeof(challenge_buf));
+    bool status = pb_encode(&stream, lwm2m_LwM2MDeviceChallenge_fields, &challenge);
+    if (status) {
+        *buf = challenge_buf;
+        *len = stream.bytes_written;
+    } else {
+        *buf = NULL;
+        *len = 0;
+    }
 }
 
 // Weak/test implementation for lora_send_message_bin
