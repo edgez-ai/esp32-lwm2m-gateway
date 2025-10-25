@@ -56,7 +56,39 @@ extern char pinCode[32];
 extern char psk_key[64];
 extern char server[128];
 
-/* LoRa receive callback function */
+// Add prototypes for external functions if not already included
+// These should match the actual signatures in ble.h and lora.h
+// Weak/test implementation for ble_get_challenge_message
+void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
+    static const uint8_t test_msg[] = {0x0a, 0x04, 0xde, 0xad, 0xbe, 0xef}; // Example protobuf bytes
+    *buf = test_msg;
+    *len = sizeof(test_msg);
+}
+
+// Weak/test implementation for lora_send_message_bin
+void lora_send_message_bin(const uint8_t *data, size_t len) {
+    // For now, just log the data as hex and as string (if printable)
+    ESP_LOGI(TAG, "lora_send_message_bin called with %d bytes", (int)len);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
+    // Optionally, send as string if printable
+    bool is_printable = true;
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] < 32 && data[i] != '\0' && data[i] != '\n' && data[i] != '\r') {
+            is_printable = false;
+            break;
+        }
+    }
+    if (is_printable && len > 0) {
+        char* str_copy = malloc(len + 1);
+        if (str_copy) {
+            memcpy(str_copy, data, len);
+            str_copy[len] = '\0';
+            lora_send_message(str_copy);
+            free(str_copy);
+        }
+    }
+    // Otherwise, just log (real implementation should send binary over LoRa)
+}
 void lora_message_received(const uint8_t* data, size_t length, float rssi, float snr) {
     ESP_LOGI(TAG, "🎯 LoRa message callback triggered!");
     ESP_LOGI(TAG, "   Length: %d bytes", length);
@@ -96,6 +128,26 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
         ESP_LOGI(TAG, "   Signal quality: Poor");
     }
 }
+
+
+// Periodically send BLE challenge protobuf message over LoRa
+void lora_challenge_task(void *pvParameters) {
+    while (1) {
+        // Get the challenge protobuf message from BLE logic
+        // Assume ble_get_challenge_message() returns pointer to buffer and length
+        const uint8_t *challenge_buf = NULL;
+        size_t challenge_len = 0;
+        ble_get_challenge_message(&challenge_buf, &challenge_len);
+        if (challenge_buf && challenge_len > 0) {
+            lora_send_message_bin(challenge_buf, challenge_len);
+            ESP_LOGI(TAG, "Sent challenge protobuf message over LoRa (%d bytes)", (int)challenge_len);
+        } else {
+            ESP_LOGW(TAG, "No challenge message available from BLE");
+        }
+        vTaskDelay(pdMS_TO_TICKS(15000)); // 15 seconds
+    }
+}
+
 
 void app_main(void)
 {
@@ -146,10 +198,10 @@ void app_main(void)
         } else {
             ESP_LOGI(TAG, "LoRa module initialized and task started successfully");
             ESP_LOGI(TAG, "🎯 LoRa is now listening with callback support");
-            
-            // Send a test message after a short delay to demonstrate the functionality
-            vTaskDelay(pdMS_TO_TICKS(2000)); // 2 second delay
-            lora_send_message("Hello from ESP32 Gateway! 🚀");
+
+            // Start periodic LoRa challenge message task
+            xTaskCreate(lora_challenge_task, "lora_challenge_task", 4096, NULL, 5, NULL);
         }
     }
 }
+
