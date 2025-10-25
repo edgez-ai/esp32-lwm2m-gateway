@@ -56,6 +56,47 @@ extern char pinCode[32];
 extern char psk_key[64];
 extern char server[128];
 
+/* LoRa receive callback function */
+void lora_message_received(const uint8_t* data, size_t length, float rssi, float snr) {
+    ESP_LOGI(TAG, "🎯 LoRa message callback triggered!");
+    ESP_LOGI(TAG, "   Length: %d bytes", length);
+    ESP_LOGI(TAG, "   RSSI: %.2f dBm", rssi);
+    ESP_LOGI(TAG, "   SNR: %.2f dB", snr);
+    
+    // Print as hex for binary data
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_INFO);
+    
+    // Try to print as string if it appears to be text
+    bool is_printable = true;
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] < 32 && data[i] != '\0' && data[i] != '\n' && data[i] != '\r') {
+            is_printable = false;
+            break;
+        }
+    }
+    
+    if (is_printable && length > 0) {
+        char* str_copy = malloc(length + 1);
+        if (str_copy) {
+            memcpy(str_copy, data, length);
+            str_copy[length] = '\0';
+            ESP_LOGI(TAG, "   Text: %s", str_copy);
+            free(str_copy);
+        }
+    }
+    
+    // Signal quality assessment
+    if (rssi > -80) {
+        ESP_LOGI(TAG, "   Signal quality: Excellent");
+    } else if (rssi > -100) {
+        ESP_LOGI(TAG, "   Signal quality: Good");
+    } else if (rssi > -120) {
+        ESP_LOGI(TAG, "   Signal quality: Fair");
+    } else {
+        ESP_LOGI(TAG, "   Signal quality: Poor");
+    }
+}
+
 void app_main(void)
 {
         // Default config
@@ -94,16 +135,21 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
     }
 
-    /* Initialize and start LoRa module */
+    /* Initialize and start LoRa module with listen-before-send pattern */
     esp_err_t lora_ret = lora_init();
     if (lora_ret != ESP_OK) {
         ESP_LOGE(TAG, "LoRa init failed: %s", esp_err_to_name(lora_ret));
     } else {
-        lora_ret = lora_start_task();
+        lora_ret = lora_start_task(lora_message_received);
         if (lora_ret != ESP_OK) {
             ESP_LOGE(TAG, "LoRa task start failed: %s", esp_err_to_name(lora_ret));
         } else {
             ESP_LOGI(TAG, "LoRa module initialized and task started successfully");
+            ESP_LOGI(TAG, "🎯 LoRa is now listening with callback support");
+            
+            // Send a test message after a short delay to demonstrate the functionality
+            vTaskDelay(pdMS_TO_TICKS(2000)); // 2 second delay
+            lora_send_message("Hello from ESP32 Gateway! 🚀");
         }
     }
 }
