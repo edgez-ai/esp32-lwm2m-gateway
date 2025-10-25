@@ -2,10 +2,6 @@
 
 #include "esp_err.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /* Start the LwM2M client task (creates FreeRTOS task internally). */
 void lwm2m_client_start(void);
 
@@ -28,7 +24,3 @@ void lwm2m_trigger_registration_update(void);
 /* Connectivity monitoring functions for updating device signal strength */
 void lwm2m_update_device_rssi(uint16_t instance_id, int rssi);
 void lwm2m_update_device_link_quality(uint16_t instance_id, int link_quality);
-
-#ifdef __cplusplus
-}
-#endif
