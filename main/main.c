@@ -81,11 +81,9 @@ void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
     static uint8_t challenge_buf[128];
     lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
     message.which_body = lwm2m_LwM2MMessage_device_challenge_tag;
-    // Generate a random 32-bit nonce (avoid zero)
-    uint32_t nonce = 0;
-    do {
-        nonce = esp_random();
-    } while (nonce == 0);
+    // Use hardcoded 32-bit nonce instead of random generation
+    uint32_t nonce = 0x12345678;  // Hardcoded nonce value
+    ESP_LOGI("main", "Using hardcoded challenge nonce: 0x%08x", nonce);
     message.body.device_challenge.nounce = nonce;
     current_challenge_nonce = nonce; // Store for verification
     // Copy public key
@@ -183,8 +181,8 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                                                                                     decrypted_signature, 
                                                                                     sizeof(decrypted_signature),
                                                                                     current_challenge_nonce,
-                                                                                    message.body.device_challenge.public_key.bytes,
-                                                                                    message.body.device_challenge.public_key.size);
+                                                                                    message.body.device_challenge_answer.public_key.bytes,
+                                                                                    message.body.device_challenge_answer.public_key.size);
                         
                         if (decrypt_success) {
                             ESP_LOGI(TAG, "Successfully decrypted signature (%u bytes)", (unsigned)decrypted_len);
@@ -196,20 +194,38 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                             } else if (decrypted_len != 64) {
                                 ESP_LOGE(TAG, "Unexpected factory signature length: %u", (unsigned)decrypted_len);
                             } else {
-                                // For LoRa, we don't have a serial, so verify against device public key only
-                                int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
-                                                                                sizeof(vendor_public_key),
-                                                                                message.body.device_challenge_answer.public_key.bytes,
-                                                                                message.body.device_challenge_answer.public_key.size,
-                                                                                decrypted_signature,
-                                                                                decrypted_len);
-                                
-                                memset(decrypted_signature, 0, decrypted_len);
 
-                                if (verify_ret != 0) {
-                                    ESP_LOGE(TAG, "Factory signature verification failed (err=%d)", verify_ret);
-                                } else {
-                                    ESP_LOGI(TAG, "Factory signature verified successfully!");
+                                            /* Construct message as: serial_string + device_public_key (like Java) */
+                                char serial_str[32];
+                                snprintf(serial_str, sizeof(serial_str), "%ld", message.serial);
+                                size_t serial_len = strlen(serial_str);
+                                
+                                /* Allocate buffer for full message */
+                                size_t full_msg_len = serial_len + message.body.device_challenge_answer.public_key.size;
+                                uint8_t *full_message = malloc(full_msg_len);
+                                int verify_ret = -1;
+                                
+                                if (full_message) {
+                                    memcpy(full_message, serial_str, serial_len);
+                                    memcpy(full_message + serial_len, message.body.device_challenge_answer.public_key.bytes, message.body.device_challenge_answer.public_key.size);
+                                    
+                                    ESP_LOGI(TAG, "Verifying signature with message: '%s' + device_key (%u bytes total)", 
+                                            serial_str, (unsigned)full_msg_len);
+                                    // For LoRa, we don't have a serial, so verify against device public key only
+                                    int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+                                                                                    sizeof(vendor_public_key),
+                                                                                    full_message,
+                                                                                    full_msg_len,
+                                                                                    decrypted_signature,
+                                                                                    decrypted_len);
+                                    
+                                    memset(decrypted_signature, 0, decrypted_len);
+
+                                    if (verify_ret != 0) {
+                                        ESP_LOGE(TAG, "Factory signature verification failed (err=%d)", verify_ret);
+                                    } else {
+                                        ESP_LOGI(TAG, "Factory signature verified successfully!");
+                                    }
                                 }
                             }
                         } else {

@@ -660,6 +660,9 @@ bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
         ESP_LOGE(LOG_TAG, "Shared key derivation failed: %d", crypto_ret);
         memset(shared_key, 0, sizeof(shared_key));
         return false;
+    }else {
+        ESP_LOGI(LOG_TAG, "Derived shared key:");
+        ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, shared_key, sizeof(shared_key), ESP_LOG_INFO);
     }
 
     uint8_t nonce12[12] = {0};
