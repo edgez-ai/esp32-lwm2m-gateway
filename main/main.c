@@ -28,7 +28,8 @@
 #include "ble.h"
 /* LoRa logic moved to lora.cpp/lora.h */
 #include "lora.h"
-
+#include <pb_decode.h>
+#include <pb_encode.h>
  #include "lwip/err.h"
  #include "lwip/sockets.h"
  #include "lwip/sys.h"
@@ -121,6 +122,9 @@ void lora_send_message_bin(const uint8_t *data, size_t len) {
     }
     // Otherwise, just log (real implementation should send binary over LoRa)
 }
+
+
+/* LoRa receive callback function */
 void lora_message_received(const uint8_t* data, size_t length, float rssi, float snr) {
     ESP_LOGI(TAG, "🎯 LoRa message callback triggered!");
     ESP_LOGI(TAG, "   Length: %d bytes", length);
@@ -158,6 +162,28 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
     // Log unescaped data
     ESP_LOGI(TAG, "   Unescaped Length: %d bytes", unescaped_len);
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, unescaped_data, unescaped_len, ESP_LOG_INFO);
+    
+    // Try to decode as LwM2MDeviceChallenge protobuf message
+    if (unescaped_len > 0) {
+        pb_istream_t istream = pb_istream_from_buffer(unescaped_data, unescaped_len);
+        lwm2m_LwM2MDeviceChallengeAnswer challenge = lwm2m_LwM2MDeviceChallengeAnswer_init_zero;
+
+        if (pb_decode(&istream, lwm2m_LwM2MDeviceChallengeAnswer_fields, &challenge)) {
+            ESP_LOGI(TAG, "✅ Successfully decoded LwM2MDeviceChallenge!");
+            ESP_LOGI(TAG, "   Public Key Length: %d bytes", challenge.public_key.size);
+            if (challenge.public_key.size > 0) {
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, challenge.public_key.bytes, challenge.public_key.size, ESP_LOG_INFO);
+            }
+            ESP_LOGI(TAG, "   Signature Length: %d bytes", challenge.signature.size);
+            if (challenge.signature.size > 0) {
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, challenge.signature.bytes, challenge.signature.size, ESP_LOG_INFO);
+            }
+
+
+        } else {
+            ESP_LOGW(TAG, "❌ Failed to decode as LwM2MDeviceChallenge: %s", PB_GET_ERROR(&istream));
+        }
+    }
     
     // Try to print as string if it appears to be text
     bool is_printable = true;
