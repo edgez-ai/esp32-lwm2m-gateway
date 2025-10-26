@@ -79,23 +79,24 @@ extern uint8_t vendor_public_key[32];
 
 void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
     static uint8_t challenge_buf[128];
-    lwm2m_LwM2MDeviceChallenge challenge = lwm2m_LwM2MDeviceChallenge_init_zero;
+    lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
+    message.which_body = lwm2m_LwM2MMessage_device_challenge_tag;
     // Generate a random 32-bit nonce (avoid zero)
     uint32_t nonce = 0;
     do {
         nonce = esp_random();
     } while (nonce == 0);
-    challenge.nounce = nonce;
+    message.body.device_challenge.nounce = nonce;
     current_challenge_nonce = nonce; // Store for verification
     // Copy public key
     extern uint8_t public_key[64];
     extern size_t public_key_len;
-    size_t pk_len = public_key_len > sizeof(challenge.public_key.bytes) ? sizeof(challenge.public_key.bytes) : public_key_len;
-    memcpy(challenge.public_key.bytes, public_key, pk_len);
-    challenge.public_key.size = pk_len;
+    size_t pk_len = public_key_len > sizeof(message.body.device_challenge.public_key.bytes) ? sizeof(message.body.device_challenge.public_key.bytes) : public_key_len;
+    memcpy(message.body.device_challenge.public_key.bytes, public_key, pk_len);
+    message.body.device_challenge.public_key.size = pk_len;
 
     pb_ostream_t stream = pb_ostream_from_buffer(challenge_buf, sizeof(challenge_buf));
-    bool status = pb_encode(&stream, lwm2m_LwM2MDeviceChallenge_fields, &challenge);
+    bool status = pb_encode(&stream, lwm2m_LwM2MMessage_fields, &message);
     if (status) {
         *buf = challenge_buf;
         *len = stream.bytes_written;
@@ -105,36 +106,16 @@ void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
     }
 }
 
-// Weak/test implementation for lora_send_message_bin
+// Proper implementation for lora_send_message_bin using the new binary LoRa function
 void lora_send_message_bin(const uint8_t *data, size_t len) {
-    // For now, just log the data as hex and as string (if printable)
     ESP_LOGI(TAG, "lora_send_message_bin called with %d bytes", (int)len);
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
 
-    // Escape 0x00 as 0xFF 0x01 and 0xFF as 0xFF 0x02
-    if (len > 0) {
-        // Worst case: every byte is 0x00 or 0xFF, so max size is 2*len
-        size_t max_escaped_len = len * 2;
-        uint8_t* escaped = malloc(max_escaped_len + 1); // +1 for null terminator if needed
-        if (escaped) {
-            size_t j = 0;
-            for (size_t i = 0; i < len; i++) {
-                if (data[i] == 0x00) {
-                    escaped[j++] = 0xFF;
-                    escaped[j++] = 0x01;
-                } else if (data[i] == 0xFF) {
-                    escaped[j++] = 0xFF;
-                    escaped[j++] = 0x02;
-                } else {
-                    escaped[j++] = data[i];
-                }
-            }
-            escaped[j] = '\0'; // Null-terminate for string safety
-            lora_send_message((char*)escaped);
-            free(escaped);
-        }
+    // Use the proper binary LoRa send function instead of escaping
+    esp_err_t ret = lora_send_binary(data, len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send binary data via LoRa: %s", esp_err_to_name(ret));
     }
-    // Otherwise, just log (real implementation should send binary over LoRa)
 }
 
 
@@ -148,94 +129,78 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
     // Print as hex for binary data
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_INFO);
 
-    // Unescape the data
-    uint8_t* unescaped_data = malloc(length);
-    if (!unescaped_data) {
-        ESP_LOGE(TAG, "Failed to allocate memory for unescaping");
-        return;
-    }
-    size_t unescaped_len = 0;
-    for (size_t i = 0; i < length; ) {
-        if (i + 1 < length && data[i] == 0xFF) {
-            if (data[i+1] == 0x01) {
-                unescaped_data[unescaped_len++] = 0x00;
-                i += 2;
-            } else if (data[i+1] == 0x02) {
-                unescaped_data[unescaped_len++] = 0xFF;
-                i += 2;
-            } else {
-                unescaped_data[unescaped_len++] = data[i];
-                i++;
-            }
-        } else {
-            unescaped_data[unescaped_len++] = data[i];
-            i++;
-        }
-    }
+    // No need to unescape since we're using proper binary transmission now
+    // Try to decode as LwM2MMessage protobuf message directly
+    if (length > 0) {
+        pb_istream_t istream = pb_istream_from_buffer(data, length);
+        lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
 
-    // Log unescaped data
-    ESP_LOGI(TAG, "   Unescaped Length: %d bytes", unescaped_len);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, unescaped_data, unescaped_len, ESP_LOG_INFO);
-    
-    // Try to decode as LwM2MDeviceChallenge protobuf message
-    if (unescaped_len > 0) {
-        pb_istream_t istream = pb_istream_from_buffer(unescaped_data, unescaped_len);
-        lwm2m_LwM2MDeviceChallengeAnswer challenge = lwm2m_LwM2MDeviceChallengeAnswer_init_zero;
+        if (pb_decode(&istream, lwm2m_LwM2MMessage_fields, &message)) {
+            ESP_LOGI(TAG, "✅ Successfully decoded LwM2MMessage!");
+            
+            // Check which message type was received
+            if (message.which_body == lwm2m_LwM2MMessage_device_challenge_tag) {
+                ESP_LOGI(TAG, "   Received device challenge message");
+                ESP_LOGI(TAG, "   Nonce: %u", message.body.device_challenge.nounce);
+                ESP_LOGI(TAG, "   Public Key Length: %d bytes", message.body.device_challenge.public_key.size);
+                if (message.body.device_challenge.public_key.size > 0) {
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, message.body.device_challenge.public_key.bytes, 
+                                           message.body.device_challenge.public_key.size, ESP_LOG_INFO);
+                }
+            } else if (message.which_body == lwm2m_LwM2MMessage_device_challenge_answer_tag) {
+                ESP_LOGI(TAG, "   Received device challenge answer");
+                ESP_LOGI(TAG, "   Public Key Length: %d bytes", message.body.device_challenge_answer.public_key.size);
+                ESP_LOGI(TAG, "   Signature Length: %d bytes", message.body.device_challenge_answer.signature.size);
+                
+                if (message.body.device_challenge_answer.signature.size > 0) {
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, message.body.device_challenge_answer.signature.bytes, 
+                                           message.body.device_challenge_answer.signature.size, ESP_LOG_INFO);
+                }
+                
+                // verify signature using factory public key
+                if (message.body.device_challenge_answer.signature.size > 0 && current_challenge_nonce != 0) {
+                    if (message.body.device_challenge_answer.public_key.size < 32) {
+                        ESP_LOGE(TAG, "Challenge answer missing peer public key (size=%u)",
+                                 (unsigned)message.body.device_challenge_answer.public_key.size);
+                    } else if (message.body.device_challenge_answer.signature.size <= 16) {
+                        ESP_LOGE(TAG, "Challenge answer signature too short (%u)",
+                                 (unsigned)message.body.device_challenge_answer.signature.size);
+                    } else {
+                        uint8_t decrypted_signature[64]; // Buffer to hold decrypted factory signature
+                        size_t decrypted_len = message.body.device_challenge_answer.signature.size - 16; // Remove tag length
 
-        if (pb_decode(&istream, lwm2m_LwM2MDeviceChallengeAnswer_fields, &challenge)) {
-            ESP_LOGI(TAG, "✅ Successfully decoded LwM2MDeviceChallenge!");
-            ESP_LOGI(TAG, "   Public Key Length: %d bytes", challenge.public_key.size);
-            if (challenge.public_key.size > 0) {
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, challenge.public_key.bytes, challenge.public_key.size, ESP_LOG_INFO);
-            }
-            ESP_LOGI(TAG, "   Signature Length: %d bytes", challenge.signature.size);
-            if (challenge.signature.size > 0) {
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, challenge.signature.bytes, challenge.signature.size, ESP_LOG_INFO);
-            }
-            // verify signature using factory public key
-            if (challenge.signature.size > 0 && current_challenge_nonce != 0) {
-                if (challenge.public_key.size < 32) {
-                    ESP_LOGE(TAG, "Challenge answer missing peer public key (size=%u)",
-                             (unsigned)challenge.public_key.size);
-                } else if (challenge.signature.size <= 16) {
-                    ESP_LOGE(TAG, "Challenge answer signature too short (%u)",
-                             (unsigned)challenge.signature.size);
-                } else {
-                    uint8_t decrypted_signature[64]; // Buffer to hold decrypted factory signature
-                    size_t decrypted_len = challenge.signature.size - 16; // Remove tag length
-                    
-                    if (decrypted_len > sizeof(decrypted_signature)) {
-                        ESP_LOGE(TAG, "Decrypted signature would overflow buffer (%u)",
-                                 (unsigned)decrypted_len);
+                        if (decrypted_len > sizeof(decrypted_signature)) {
+                            ESP_LOGE(TAG, "Decrypted signature would overflow buffer (%u)",
+                                     (unsigned)decrypted_len);
                     } else {
                         ESP_LOGI(TAG, "Decrypting signature (%u bytes) using nonce %u", 
-                                 (unsigned)challenge.signature.size, (unsigned)current_challenge_nonce);
+                                 (unsigned)message.body.device_challenge_answer.signature.size, (unsigned)current_challenge_nonce);
                         
                         // Note: chacha20_poly1305_decrypt_with_nonce function needs to be available
                         // For now, assuming it's implemented elsewhere or we need to copy it
-                        bool decrypt_success = chacha20_poly1305_decrypt_with_nonce(challenge.signature.bytes, 
-                                                                                    challenge.signature.size, 
+                        bool decrypt_success = chacha20_poly1305_decrypt_with_nonce(message.body.device_challenge_answer.signature.bytes, 
+                                                                                    message.body.device_challenge_answer.signature.size, 
                                                                                     decrypted_signature, 
                                                                                     sizeof(decrypted_signature),
                                                                                     current_challenge_nonce,
-                                                                                    challenge.public_key.bytes,
-                                                                                    challenge.public_key.size);
+                                                                                    message.body.device_challenge.public_key.bytes,
+                                                                                    message.body.device_challenge.public_key.size);
                         
                         if (decrypt_success) {
                             ESP_LOGI(TAG, "Successfully decrypted signature (%u bytes)", (unsigned)decrypted_len);
                             ESP_LOG_BUFFER_HEX_LEVEL(TAG, decrypted_signature, decrypted_len, ESP_LOG_INFO);
 
-                            if (challenge.public_key.size != 32) {
+                            if (message.body.device_challenge_answer.public_key.size != 32) {
                                 ESP_LOGE(TAG, "Unexpected public key length %u in challenge answer",
-                                         (unsigned)challenge.public_key.size);
+                                         (unsigned)message.body.device_challenge_answer.public_key.size);
                             } else if (decrypted_len != 64) {
                                 ESP_LOGE(TAG, "Unexpected factory signature length: %u", (unsigned)decrypted_len);
                             } else {
                                 // For LoRa, we don't have a serial, so verify against device public key only
                                 int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
                                                                                 sizeof(vendor_public_key),
-                                                                                challenge.public_key.bytes,
-                                                                                challenge.public_key.size,
+                                                                                message.body.device_challenge_answer.public_key.bytes,
+                                                                                message.body.device_challenge_answer.public_key.size,
                                                                                 decrypted_signature,
                                                                                 decrypted_len);
                                 
@@ -255,33 +220,33 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
             } else {
                 ESP_LOGW(TAG, "No signature to verify or no current challenge nonce");
             }
-            
+            } else {
+                ESP_LOGI(TAG, "   Received other message type: %d", (int)message.which_body);
+            }
 
         } else {
-            ESP_LOGW(TAG, "❌ Failed to decode as LwM2MDeviceChallenge: %s", PB_GET_ERROR(&istream));
+            ESP_LOGW(TAG, "❌ Failed to decode as LwM2MMessage: %s", PB_GET_ERROR(&istream));
+            
+            // Try to print as string if it appears to be text
+            bool is_printable = true;
+            for (size_t i = 0; i < length; i++) {
+                if (data[i] < 32 && data[i] != '\0' && data[i] != '\n' && data[i] != '\r') {
+                    is_printable = false;
+                    break;
+                }
+            }
+            
+            if (is_printable && length > 0) {
+                char* str_copy = malloc(length + 1);
+                if (str_copy) {
+                    memcpy(str_copy, data, length);
+                    str_copy[length] = '\0';
+                    ESP_LOGI(TAG, "   Text: %s", str_copy);
+                    free(str_copy);
+                }
+            }
         }
     }
-    
-    // Try to print as string if it appears to be text
-    bool is_printable = true;
-    for (size_t i = 0; i < unescaped_len; i++) {
-        if (unescaped_data[i] < 32 && unescaped_data[i] != '\0' && unescaped_data[i] != '\n' && unescaped_data[i] != '\r') {
-            is_printable = false;
-            break;
-        }
-    }
-    
-    if (is_printable && unescaped_len > 0) {
-        char* str_copy = malloc(unescaped_len + 1);
-        if (str_copy) {
-            memcpy(str_copy, unescaped_data, unescaped_len);
-            str_copy[unescaped_len] = '\0';
-            ESP_LOGI(TAG, "   Text: %s", str_copy);
-            free(str_copy);
-        }
-    }
-
-    free(unescaped_data);
     
     // Signal quality assessment
     if (rssi > -80) {

@@ -35,7 +35,12 @@ static const char *TAG = "lora";
 
 // Message structure for send queue
 typedef struct {
-    char message[LORA_MAX_PACKET_SIZE];
+    bool is_binary;  // true for binary data, false for string
+    union {
+        char message[LORA_MAX_PACKET_SIZE];           // For string messages
+        uint8_t binary_data[LORA_MAX_PACKET_SIZE];    // For binary data
+    };
+    size_t length;              // Length for binary data (ignored for strings)
     uint32_t listen_timeout_ms;
 } lora_send_msg_t;
 
@@ -127,14 +132,25 @@ static void lora_task(void *pvParameters) {
     for(;;) {
         // Check if there's a message to send in the queue
         if (xQueueReceive(send_queue, &send_msg, pdMS_TO_TICKS(100)) == pdTRUE) {
-            ESP_LOGI(TAG, "📤 Processing message from queue: %s", send_msg.message);
+            if (send_msg.is_binary) {
+                ESP_LOGI(TAG, "📤 Processing binary message from queue (%d bytes)", (int)send_msg.length);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, send_msg.binary_data, send_msg.length, ESP_LOG_INFO);
+            } else {
+                ESP_LOGI(TAG, "📤 Processing string message from queue: %s", send_msg.message);
+            }
             
             // Listen before sending (collision avoidance)
             bool channel_busy = listen_for_packets(send_msg.listen_timeout_ms);
             
-            // Send the message (even if channel was busy, after waiting)
-            ESP_LOGI(TAG, "[SX1262] Transmitting message: %s", send_msg.message);
-            int state = radio->transmit(send_msg.message);
+            // Send the message (binary or string)
+            int state;
+            if (send_msg.is_binary) {
+                ESP_LOGI(TAG, "[SX1262] Transmitting binary data (%d bytes)", (int)send_msg.length);
+                state = radio->transmit(send_msg.binary_data, send_msg.length);
+            } else {
+                ESP_LOGI(TAG, "[SX1262] Transmitting string message: %s", send_msg.message);
+                state = radio->transmit(send_msg.message);
+            }
             
             if (state == RADIOLIB_ERR_NONE) {
                 ESP_LOGI(TAG, "✅ Message transmitted successfully!");
@@ -288,8 +304,10 @@ extern "C" esp_err_t lora_send_message_with_timeout(const char* message, uint32_
     
     // Prepare message for queue
     lora_send_msg_t send_msg;
+    send_msg.is_binary = false;  // This is a string message
     strncpy(send_msg.message, message, sizeof(send_msg.message) - 1);
     send_msg.message[sizeof(send_msg.message) - 1] = '\0'; // Ensure null termination
+    send_msg.length = 0;  // Not used for string messages
     send_msg.listen_timeout_ms = listen_timeout_ms;
     
     // Add message to send queue
@@ -299,6 +317,49 @@ extern "C" esp_err_t lora_send_message_with_timeout(const char* message, uint32_
     }
     
     ESP_LOGI(TAG, "📝 Message queued for transmission: %s", message);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t lora_send_binary(const uint8_t* data, size_t length) {
+    return lora_send_binary_with_timeout(data, length, LORA_DEFAULT_LISTEN_TIME_MS);
+}
+
+extern "C" esp_err_t lora_send_binary_with_timeout(const uint8_t* data, size_t length, uint32_t listen_timeout_ms) {
+    if (send_queue == nullptr) {
+        ESP_LOGE(TAG, "LoRa task not started. Call lora_start_task() first.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (data == nullptr) {
+        ESP_LOGE(TAG, "Data is null");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (length == 0) {
+        ESP_LOGE(TAG, "Data length is zero");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (length > LORA_MAX_PACKET_SIZE) {
+        ESP_LOGE(TAG, "Data too long (max %d bytes)", LORA_MAX_PACKET_SIZE);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Prepare binary message for queue
+    lora_send_msg_t send_msg;
+    send_msg.is_binary = true;  // This is binary data
+    memcpy(send_msg.binary_data, data, length);
+    send_msg.length = length;
+    send_msg.listen_timeout_ms = listen_timeout_ms;
+    
+    // Add message to send queue
+    if (xQueueSend(send_queue, &send_msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to queue binary data for sending (queue full?)");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    ESP_LOGI(TAG, "📝 Binary data queued for transmission (%d bytes)", (int)length);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_INFO);
     return ESP_OK;
 }
 
