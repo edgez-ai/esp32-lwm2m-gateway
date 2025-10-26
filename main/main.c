@@ -129,25 +129,56 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
     
     // Print as hex for binary data
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_INFO);
+
+    // Unescape the data
+    uint8_t* unescaped_data = malloc(length);
+    if (!unescaped_data) {
+        ESP_LOGE(TAG, "Failed to allocate memory for unescaping");
+        return;
+    }
+    size_t unescaped_len = 0;
+    for (size_t i = 0; i < length; ) {
+        if (i + 1 < length && data[i] == 0xFF) {
+            if (data[i+1] == 0x01) {
+                unescaped_data[unescaped_len++] = 0x00;
+                i += 2;
+            } else if (data[i+1] == 0x02) {
+                unescaped_data[unescaped_len++] = 0xFF;
+                i += 2;
+            } else {
+                unescaped_data[unescaped_len++] = data[i];
+                i++;
+            }
+        } else {
+            unescaped_data[unescaped_len++] = data[i];
+            i++;
+        }
+    }
+
+    // Log unescaped data
+    ESP_LOGI(TAG, "   Unescaped Length: %d bytes", unescaped_len);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, unescaped_data, unescaped_len, ESP_LOG_INFO);
     
     // Try to print as string if it appears to be text
     bool is_printable = true;
-    for (size_t i = 0; i < length; i++) {
-        if (data[i] < 32 && data[i] != '\0' && data[i] != '\n' && data[i] != '\r') {
+    for (size_t i = 0; i < unescaped_len; i++) {
+        if (unescaped_data[i] < 32 && unescaped_data[i] != '\0' && unescaped_data[i] != '\n' && unescaped_data[i] != '\r') {
             is_printable = false;
             break;
         }
     }
     
-    if (is_printable && length > 0) {
-        char* str_copy = malloc(length + 1);
+    if (is_printable && unescaped_len > 0) {
+        char* str_copy = malloc(unescaped_len + 1);
         if (str_copy) {
-            memcpy(str_copy, data, length);
-            str_copy[length] = '\0';
+            memcpy(str_copy, unescaped_data, unescaped_len);
+            str_copy[unescaped_len] = '\0';
             ESP_LOGI(TAG, "   Text: %s", str_copy);
             free(str_copy);
         }
     }
+
+    free(unescaped_data);
     
     // Signal quality assessment
     if (rssi > -80) {
