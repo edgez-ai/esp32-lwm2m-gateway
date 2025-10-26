@@ -44,6 +44,15 @@
 #include "lwm2mclient.h"
 extern lwm2m_object_t *objArray[6];
 
+/* Conditional minimal crypto support for ChaCha20-Poly1305 */
+#if defined(CONFIG_MBEDTLS_CHACHA20_C) && defined(CONFIG_MBEDTLS_POLY1305_C)
+#include "mbedtls/chacha20.h"
+#include "mbedtls/poly1305.h"
+#define HAS_CHACHA20_POLY1305 1
+#else
+#define HAS_CHACHA20_POLY1305 0
+#endif
+
 //#define LWM2M_SERVER_URI "coaps://192.168.10.148:5685"
 static const char *TAG = "main";
 static float tsens_out; /* local temperature reading passed to lwm2m module */
@@ -56,6 +65,10 @@ extern size_t private_key_len;
 extern char pinCode[32];
 extern char psk_key[64];
 extern char server[128];
+
+// Add global variables for signature verification
+static uint32_t current_challenge_nonce = 0;
+extern uint8_t vendor_public_key[32];
 
 // Add prototypes for external functions if not already included
 // These should match the actual signatures in ble.h and lora.h
@@ -73,6 +86,7 @@ void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
         nonce = esp_random();
     } while (nonce == 0);
     challenge.nounce = nonce;
+    current_challenge_nonce = nonce; // Store for verification
     // Copy public key
     extern uint8_t public_key[64];
     extern size_t public_key_len;
@@ -178,7 +192,70 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
             if (challenge.signature.size > 0) {
                 ESP_LOG_BUFFER_HEX_LEVEL(TAG, challenge.signature.bytes, challenge.signature.size, ESP_LOG_INFO);
             }
+            // verify signature using factory public key
+            if (challenge.signature.size > 0 && current_challenge_nonce != 0) {
+                if (challenge.public_key.size < 32) {
+                    ESP_LOGE(TAG, "Challenge answer missing peer public key (size=%u)",
+                             (unsigned)challenge.public_key.size);
+                } else if (challenge.signature.size <= 16) {
+                    ESP_LOGE(TAG, "Challenge answer signature too short (%u)",
+                             (unsigned)challenge.signature.size);
+                } else {
+                    uint8_t decrypted_signature[64]; // Buffer to hold decrypted factory signature
+                    size_t decrypted_len = challenge.signature.size - 16; // Remove tag length
+                    
+                    if (decrypted_len > sizeof(decrypted_signature)) {
+                        ESP_LOGE(TAG, "Decrypted signature would overflow buffer (%u)",
+                                 (unsigned)decrypted_len);
+                    } else {
+                        ESP_LOGI(TAG, "Decrypting signature (%u bytes) using nonce %u", 
+                                 (unsigned)challenge.signature.size, (unsigned)current_challenge_nonce);
+                        
+                        // Note: chacha20_poly1305_decrypt_with_nonce function needs to be available
+                        // For now, assuming it's implemented elsewhere or we need to copy it
+                        bool decrypt_success = chacha20_poly1305_decrypt_with_nonce(challenge.signature.bytes, 
+                                                                                    challenge.signature.size, 
+                                                                                    decrypted_signature, 
+                                                                                    sizeof(decrypted_signature),
+                                                                                    current_challenge_nonce,
+                                                                                    challenge.public_key.bytes,
+                                                                                    challenge.public_key.size);
+                        
+                        if (decrypt_success) {
+                            ESP_LOGI(TAG, "Successfully decrypted signature (%u bytes)", (unsigned)decrypted_len);
+                            ESP_LOG_BUFFER_HEX_LEVEL(TAG, decrypted_signature, decrypted_len, ESP_LOG_INFO);
 
+                            if (challenge.public_key.size != 32) {
+                                ESP_LOGE(TAG, "Unexpected public key length %u in challenge answer",
+                                         (unsigned)challenge.public_key.size);
+                            } else if (decrypted_len != 64) {
+                                ESP_LOGE(TAG, "Unexpected factory signature length: %u", (unsigned)decrypted_len);
+                            } else {
+                                // For LoRa, we don't have a serial, so verify against device public key only
+                                int verify_ret = lwm2m_ed25519_verify_signature(vendor_public_key,
+                                                                                sizeof(vendor_public_key),
+                                                                                challenge.public_key.bytes,
+                                                                                challenge.public_key.size,
+                                                                                decrypted_signature,
+                                                                                decrypted_len);
+                                
+                                memset(decrypted_signature, 0, decrypted_len);
+
+                                if (verify_ret != 0) {
+                                    ESP_LOGE(TAG, "Factory signature verification failed (err=%d)", verify_ret);
+                                } else {
+                                    ESP_LOGI(TAG, "Factory signature verified successfully!");
+                                }
+                            }
+                        } else {
+                            ESP_LOGE(TAG, "Failed to decrypt signature");
+                        }
+                    }
+                }
+            } else {
+                ESP_LOGW(TAG, "No signature to verify or no current challenge nonce");
+            }
+            
 
         } else {
             ESP_LOGW(TAG, "❌ Failed to decode as LwM2MDeviceChallenge: %s", PB_GET_ERROR(&istream));

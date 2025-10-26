@@ -98,7 +98,7 @@ extern size_t private_key_len;
 extern uint8_t vendor_public_key[32];
 
 /* ChaCha20-Poly1305 decryption (forward declarations) */
-static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
+bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
                                                  uint8_t *out, size_t out_cap,
                                                  uint32_t nonce32, const uint8_t *peer_pub,
                                                  size_t peer_pub_len);
@@ -627,7 +627,7 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
 
 
 /* ChaCha20-Poly1305 decryption (forward declarations) */
-static bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
+bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
                                                  uint8_t *out, size_t out_cap,
                                                  uint32_t nonce32, const uint8_t *peer_pub,
                                                  size_t peer_pub_len)

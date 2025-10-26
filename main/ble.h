@@ -33,6 +33,12 @@ void ble_client_cleanup_stale_challenges(void);
 /* Find pending challenge by BLE address */
 bool ble_client_find_challenge_by_address(const uint8_t *addr, uint32_t *serial_out, uint32_t *model_out);
 
+/* ChaCha20-Poly1305 decryption function */
+bool chacha20_poly1305_decrypt_with_nonce(const uint8_t *in, size_t in_len,
+                                         uint8_t *out, size_t out_cap,
+                                         uint32_t nonce32, const uint8_t *peer_pub,
+                                         size_t peer_pub_len);
+
 #ifdef __cplusplus
 }
 #endif
