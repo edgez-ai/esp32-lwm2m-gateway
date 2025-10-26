@@ -74,6 +74,12 @@ esp_err_t device_ring_buffer_clear_flash(void);
 /* Sync gateway statistics with current device count */
 void device_ring_buffer_sync_gateway_stats(void);
 
+/* Check if a device with the given public key is already known */
+bool device_ring_buffer_is_device_known(const uint8_t *public_key, size_t public_key_len);
+
+/* Add a device with public key, model, and serial number */
+esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial);
+
 #ifdef __cplusplus
 }
 #endif

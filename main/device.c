@@ -354,3 +354,78 @@ void device_ring_buffer_sync_gateway_stats(void)
         ESP_LOGI(TAG, "Synced gateway device count: %ld", device_count);
     }
 }
+
+/* Check if a device with the given public key is already known */
+bool device_ring_buffer_is_device_known(const uint8_t *public_key, size_t public_key_len)
+{
+    if (!g_initialized) {
+        ESP_LOGE(TAG, "Device ring buffer not initialized");
+        return false;
+    }
+
+    if (public_key == NULL || public_key_len == 0) {
+        ESP_LOGE(TAG, "Invalid public key parameters");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < g_device_buffer.count; i++) {
+        lwm2m_LwM2MDevice *device = &g_device_buffer.devices[i];
+        
+        // Compare public keys
+        if (device->public_key.size == public_key_len && 
+            device->public_key.size > 0 && 
+            memcmp(device->public_key.bytes, public_key, public_key_len) == 0) {
+            ESP_LOGI(TAG, "Device with public key found (serial: %ld, model: %ld)", 
+                     device->serial, device->model);
+            return true;
+        }
+    }
+
+    ESP_LOGI(TAG, "Device with given public key not found");
+    return false;
+}
+
+/* Add a device with public key, model, and serial number */
+esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial)
+{
+    if (!g_initialized) {
+        ESP_LOGE(TAG, "Device ring buffer not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (public_key == NULL || public_key_len == 0) {
+        ESP_LOGE(TAG, "Invalid public key parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (public_key_len > sizeof(((lwm2m_LwM2MDevice*)0)->public_key.bytes)) {
+        ESP_LOGE(TAG, "Public key too large (%d bytes, max %d)", 
+                 (int)public_key_len, (int)sizeof(((lwm2m_LwM2MDevice*)0)->public_key.bytes));
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Check if device with this public key already exists
+    if (device_ring_buffer_is_device_known(public_key, public_key_len)) {
+        ESP_LOGW(TAG, "Device with this public key already exists");
+        return ESP_OK; // Not an error, just already exists
+    }
+
+    // Create a new device structure
+    lwm2m_LwM2MDevice new_device;
+    memset(&new_device, 0, sizeof(new_device));
+    
+    new_device.model = model;
+    new_device.serial = serial;
+    new_device.instance_id = g_device_buffer.count; // Use current count as instance ID
+    new_device.banned = false;
+    
+    // Copy public key
+    memcpy(new_device.public_key.bytes, public_key, public_key_len);
+    new_device.public_key.size = public_key_len;
+
+    ESP_LOGI(TAG, "Adding device - Model: %ld, Serial: %ld, Public key size: %d", 
+             model, serial, (int)public_key_len);
+
+    // Add the device to the ring buffer
+    return device_ring_buffer_add(&new_device);
+}

@@ -81,9 +81,10 @@ void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
     static uint8_t challenge_buf[128];
     lwm2m_LwM2MMessage message = lwm2m_LwM2MMessage_init_zero;
     message.which_body = lwm2m_LwM2MMessage_device_challenge_tag;
-    // Use hardcoded 32-bit nonce instead of random generation
-    uint32_t nonce = 0x12345678;  // Hardcoded nonce value
-    ESP_LOGI("main", "Using hardcoded challenge nonce: 0x%08x", nonce);
+    uint32_t nonce = 0;
+    do {
+        nonce = esp_random();
+    } while (nonce == 0);
     message.body.device_challenge.nounce = nonce;
     current_challenge_nonce = nonce; // Store for verification
     // Copy public key
@@ -149,7 +150,13 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                 ESP_LOGI(TAG, "   Received device challenge answer");
                 ESP_LOGI(TAG, "   Public Key Length: %d bytes", message.body.device_challenge_answer.public_key.size);
                 ESP_LOGI(TAG, "   Signature Length: %d bytes", message.body.device_challenge_answer.signature.size);
-                
+                // if the device is already known, skip verification
+                if (device_ring_buffer_is_device_known(
+                        message.body.device_challenge_answer.public_key.bytes,
+                        message.body.device_challenge_answer.public_key.size)) {
+                    ESP_LOGI(TAG, "Device already known, skipping signature verification");
+                    return;
+                }
                 if (message.body.device_challenge_answer.signature.size > 0) {
                     ESP_LOG_BUFFER_HEX_LEVEL(TAG, message.body.device_challenge_answer.signature.bytes, 
                                            message.body.device_challenge_answer.signature.size, ESP_LOG_INFO);
@@ -225,6 +232,13 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                                         ESP_LOGE(TAG, "Factory signature verification failed (err=%d)", verify_ret);
                                     } else {
                                         ESP_LOGI(TAG, "Factory signature verified successfully!");
+                                        // when verified, add device to ring buffer or known devices
+                                        device_ring_buffer_add_device(
+                                            message.body.device_challenge_answer.public_key.bytes,
+                                            message.body.device_challenge_answer.public_key.size,
+                                            message.model,
+                                            message.serial
+                                        );
                                     }
                                 }
                             }
