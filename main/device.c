@@ -385,6 +385,35 @@ bool device_ring_buffer_is_device_known(const uint8_t *public_key, size_t public
     return false;
 }
 
+lwm2m_LwM2MDevice* device_ring_buffer_find_by_public_key(const uint8_t *public_key, size_t public_key_len)
+{
+    if (!g_initialized) {
+        ESP_LOGE(TAG, "Device ring buffer not initialized");
+        return NULL;
+    }
+
+    if (public_key == NULL || public_key_len == 0) {
+        ESP_LOGE(TAG, "Invalid public key parameters");
+        return NULL;
+    }
+
+    for (uint32_t i = 0; i < g_device_buffer.count; i++) {
+        lwm2m_LwM2MDevice *device = &g_device_buffer.devices[i];
+        
+        // Compare public keys
+        if (device->public_key.size == public_key_len && 
+            device->public_key.size > 0 && 
+            memcmp(device->public_key.bytes, public_key, public_key_len) == 0) {
+            ESP_LOGI(TAG, "Device with public key found (serial: %ld, model: %ld)", 
+                     device->serial, device->model);
+            return device;
+        }
+    }
+
+    ESP_LOGI(TAG, "Device with given public key not found");
+    return NULL;
+}
+
 /* Add a device with public key, model, and serial number */
 esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial)
 {

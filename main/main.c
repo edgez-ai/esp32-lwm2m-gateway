@@ -136,6 +136,14 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
 
         if (pb_decode(&istream, lwm2m_LwM2MMessage_fields, &message)) {
             ESP_LOGI(TAG, "✅ Successfully decoded LwM2MMessage!");
+            ESP_LOGI(TAG, "   Model: %ld, Serial: %ld", message.model, message.serial);
+            
+            // For any message from a known device, update RSSI for connection monitoring
+            lwm2m_LwM2MDevice *existing_device = device_ring_buffer_find_by_serial(message.serial);
+            if (existing_device != NULL) {
+                ESP_LOGI(TAG, "Message from known device (serial: %ld), updating RSSI", message.serial);
+                lwm2m_update_device_rssi(existing_device->instance_id, (int)rssi);
+            }
             
             // Check which message type was received
             if (message.which_body == lwm2m_LwM2MMessage_device_challenge_tag) {
@@ -150,11 +158,18 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                 ESP_LOGI(TAG, "   Received device challenge answer");
                 ESP_LOGI(TAG, "   Public Key Length: %d bytes", message.body.device_challenge_answer.public_key.size);
                 ESP_LOGI(TAG, "   Signature Length: %d bytes", message.body.device_challenge_answer.signature.size);
-                // if the device is already known, skip verification
-                if (device_ring_buffer_is_device_known(
+                
+                // Check if the device is already known and update RSSI for connection monitoring
+                lwm2m_LwM2MDevice *existing_device = device_ring_buffer_find_by_public_key(
                         message.body.device_challenge_answer.public_key.bytes,
-                        message.body.device_challenge_answer.public_key.size)) {
-                    ESP_LOGI(TAG, "Device already known, skipping signature verification");
+                        message.body.device_challenge_answer.public_key.size);
+                
+                if (existing_device != NULL) {
+                    ESP_LOGI(TAG, "Device already known (serial: %ld), updating RSSI and skipping verification", existing_device->serial);
+                    
+                    // Update connectivity monitoring RSSI for existing device
+                    lwm2m_update_device_rssi(existing_device->instance_id, (int)rssi);
+                    
                     return;
                 }
                 if (message.body.device_challenge_answer.signature.size > 0) {
@@ -249,12 +264,15 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                 }
             } else {
                 ESP_LOGW(TAG, "No signature to verify or no current challenge nonce");
-            }
+                }
+            } else if (message.which_body == lwm2m_LwM2MMessage_status_report_tag) {
+                ESP_LOGI(TAG, "   Received status report from device serial %ld", message.serial);
+                ESP_LOGI(TAG, "   Battery Level: %ld", message.body.status_report.battery_level);
+                ESP_LOGI(TAG, "   Uptime: %ld seconds", message.body.status_report.uptime);
+                // Additional status report processing could be added here
             } else {
                 ESP_LOGI(TAG, "   Received other message type: %d", (int)message.which_body);
-            }
-
-        } else {
+            }        } else {
             ESP_LOGW(TAG, "❌ Failed to decode as LwM2MMessage: %s", PB_GET_ERROR(&istream));
             
             // Try to print as string if it appears to be text
