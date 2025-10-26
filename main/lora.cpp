@@ -231,7 +231,15 @@ extern "C" esp_err_t lora_init(void) {
     ESP_LOGI(TAG, "SPI pins - SCK: 9, MISO: 11, MOSI: 10");
     ESP_LOGI(TAG, "LoRa pins - NSS: 8, DIO1: 14, RST: 12, BUSY: 13");
     
-    int state = radio->begin();
+    int state = radio->begin(
+        868.0,     // Frequency: 868 MHz (EU region)
+        250.0,     // Bandwidth: 250.0 kHz (higher = faster data rate)
+        7,         // Spreading factor: 7 (fastest, largest payload up to 255 bytes)
+        5,         // Coding rate: 5 (4/5 - fastest, less error correction)
+        0x12,      // Sync word: default LoRa sync word
+        14,        // Output power: 14 dBm
+        8          // Preamble length: 8 symbols (default)
+    );
     if (state != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "SX1262 initialization failed, code %d", state);
         delete radio;
