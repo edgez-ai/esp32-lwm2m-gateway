@@ -38,7 +38,7 @@
 #include "lwm2mclient.h"
 
 /* External declarations for lwm2m objects */
-extern lwm2m_object_t *objArray[11];
+extern lwm2m_object_t *lwm2m_obj_array[11];
 
 
 /* Conditional minimal crypto support: provide stubs if mbedTLS components not enabled. */
@@ -573,14 +573,14 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
         remove_pending_challenge(sender_serial);
         
         // If LwM2M client is initialized, add the gateway instance and notify server
-        if (objArray[5] != NULL) {
+        if (lwm2m_obj_array[5] != NULL) {
             uint32_t device_count = device_ring_buffer_get_count();
-            gateway_add_instance(objArray[5], device_count - 1, new_device.serial, CONNECTION_BLE);
+            gateway_add_instance(lwm2m_obj_array[5], device_count - 1, new_device.serial, CONNECTION_BLE);
             
             // Add connectivity monitoring instance for the new device (using instance_id when available)
-            if (objArray[6] != NULL) {
+            if (lwm2m_obj_array[6] != NULL) {
                 // For new devices, instance_id is 0 initially, so use device_count-1 as temporary instance_id
-                connectivity_moni_add_instance(objArray[6], device_count - 1, new_device.serial);
+                connectivity_moni_add_instance(lwm2m_obj_array[6], device_count - 1, new_device.serial);
                 ESP_LOGI(LOG_TAG, "Added connectivity monitoring instance for new device serial %ld", new_device.serial);
             }
             

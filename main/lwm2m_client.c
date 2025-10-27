@@ -25,6 +25,9 @@
 #include "flash.h"
 #include "device.h"
 
+// Forward declaration for missing gateway function
+uint8_t gateway_update_instance_value(lwm2m_object_t * objectP, uint16_t instanceId, uint16_t resourceId, int64_t value);
+
 /* Keep RTC persisted data across deep sleep resets */
 RTC_DATA_ATTR char rtc_lwm2m_server_uri[128] = {0};
 RTC_DATA_ATTR char rtc_lwm2m_identity[64] = {0};
@@ -45,7 +48,7 @@ size_t private_key_len = 0;
 char pinCode[32] = {0};
 char psk_key[64] = {0};
 char server[128] = {0};
-static lwm2m_object_t *objArray[11] = {0};  // Expanded for WoT objects and connectivity monitoring
+lwm2m_object_t *lwm2m_obj_array[11] = {0};  // Expanded for WoT objects and connectivity monitoring
 static uint8_t rx_buffer[2048];
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 static bool wot_model_printed = false;  // Flag to print WoT model only once
@@ -59,12 +62,12 @@ static void print_wot_things_model(void)
 {
     ESP_LOGI(TAG, "==================== W3C WoT THINGS MODEL ====================");
     
-    if (objArray[7] == NULL) {
+    if (lwm2m_obj_array[7] == NULL) {
         ESP_LOGW(TAG, "WoT objects not initialized");
         return;
     }
     
-    lwm2m_object_t *thing_obj = objArray[7];  // WoT Thing object
+    lwm2m_object_t *thing_obj = lwm2m_obj_array[7];  // WoT Thing object
     wot_thing_instance_t *thing_instance = (wot_thing_instance_t *)thing_obj->instanceList;
     
     if (thing_instance == NULL) {
@@ -129,9 +132,9 @@ static void print_wot_things_model(void)
     
     // Print Data Features
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Data Features (Object %u):", objArray[8] ? objArray[8]->objID : 0);
-    if (objArray[8] && objArray[8]->instanceList) {
-        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)objArray[8]->instanceList;
+    ESP_LOGI(TAG, "Data Features (Object %u):", lwm2m_obj_array[8] ? lwm2m_obj_array[8]->objID : 0);
+    if (lwm2m_obj_array[8] && lwm2m_obj_array[8]->instanceList) {
+        wot_data_feature_instance_t *feature_instance = (wot_data_feature_instance_t *)lwm2m_obj_array[8]->instanceList;
         while (feature_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", feature_instance->instanceId, feature_instance->feature_identifier);
             ESP_LOGI(TAG, "    Linked Resources: %d", feature_instance->linked_resources_count);
@@ -152,9 +155,9 @@ static void print_wot_things_model(void)
     
     // Print Actions
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Actions (Object %u):", objArray[9] ? objArray[9]->objID : 0);
-    if (objArray[9] && objArray[9]->instanceList) {
-        wot_action_instance_t *action_instance = (wot_action_instance_t *)objArray[9]->instanceList;
+    ESP_LOGI(TAG, "Actions (Object %u):", lwm2m_obj_array[9] ? lwm2m_obj_array[9]->objID : 0);
+    if (lwm2m_obj_array[9] && lwm2m_obj_array[9]->instanceList) {
+        wot_action_instance_t *action_instance = (wot_action_instance_t *)lwm2m_obj_array[9]->instanceList;
         while (action_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", action_instance->instanceId, action_instance->action_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", action_instance->script_size);
@@ -173,9 +176,9 @@ static void print_wot_things_model(void)
     
     // Print Events
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Events (Object %u):", objArray[10] ? objArray[10]->objID : 0);
-    if (objArray[10] && objArray[10]->instanceList) {
-        wot_event_instance_t *event_instance = (wot_event_instance_t *)objArray[10]->instanceList;
+    ESP_LOGI(TAG, "Events (Object %u):", lwm2m_obj_array[10] ? lwm2m_obj_array[10]->objID : 0);
+    if (lwm2m_obj_array[10] && lwm2m_obj_array[10]->instanceList) {
+        wot_event_instance_t *event_instance = (wot_event_instance_t *)lwm2m_obj_array[10]->instanceList;
         while (event_instance != NULL) {
             ESP_LOGI(TAG, "  Instance %d: %s", event_instance->instanceId, event_instance->event_identifier);
             ESP_LOGI(TAG, "    Script Size: %zu bytes", event_instance->script_size);
@@ -333,33 +336,33 @@ static void client_task(void *pvParameters)
 
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
         ESP_LOGI(TAG, "Restoring LwM2M config from RTC memory (URI=%s, ID=%s, PSK=%s)", rtc_lwm2m_server_uri, rtc_lwm2m_identity, rtc_lwm2m_psk);
-        objArray[0] = get_security_object(1, rtc_lwm2m_server_uri, rtc_lwm2m_identity, rtc_lwm2m_psk, strlen(rtc_lwm2m_psk), false);
+        lwm2m_obj_array[0] = get_security_object(1, rtc_lwm2m_server_uri, rtc_lwm2m_identity, rtc_lwm2m_psk, strlen(rtc_lwm2m_psk), false);
     } else {
         char psk_identity[96] = {0};
         snprintf(psk_identity, sizeof(psk_identity), "%s%s", serialNumber, pinCode);
-        objArray[0] = get_security_object(1, LWM2M_SERVER_URI, psk_identity, psk_key, strlen(psk_key), true);
+        lwm2m_obj_array[0] = get_security_object(1, LWM2M_SERVER_URI, psk_identity, psk_key, strlen(psk_key), true);
     }
-    objArray[1] = get_server_object(1, "U", 300, false);
-    objArray[2] = get_object_device();
-    objArray[3] = get_vendor_object();
-    objArray[4] = get_test_object();
-    objArray[5] = get_object_gateway();  // Add gateway object
-    objArray[6] = get_object_conn_m();   // Add connectivity monitoring object
+    lwm2m_obj_array[1] = get_server_object(1, "U", 300, false);
+    lwm2m_obj_array[2] = get_object_device();
+    lwm2m_obj_array[3] = get_vendor_object();
+    lwm2m_obj_array[4] = get_test_object();
+    lwm2m_obj_array[5] = get_object_gateway();  // Add gateway object
+    lwm2m_obj_array[6] = get_object_conn_m();   // Add connectivity monitoring object
 
     // Initialize W3C WoT objects
-    objArray[7] = get_object_wot_thing();         // Object 26250
-    objArray[8] = get_object_wot_data_feature();  // Object 26251
-    objArray[9] = get_object_wot_action();        // Object 26252
-    objArray[10] = get_object_wot_event();         // Object 26253
+    lwm2m_obj_array[7] = get_object_wot_thing();         // Object 26250
+    lwm2m_obj_array[8] = get_object_wot_data_feature();  // Object 26251
+    lwm2m_obj_array[9] = get_object_wot_action();        // Object 26252
+    lwm2m_obj_array[10] = get_object_wot_event();         // Object 26253
     
     // Apply default WoT configuration if objects were created successfully
-    if (objArray[7] && objArray[8] && objArray[9] && objArray[10]) {
+    if (lwm2m_obj_array[7] && lwm2m_obj_array[8] && lwm2m_obj_array[9] && lwm2m_obj_array[10]) {
         // Create a temporary wot_objects structure for configuration
         wot_objects_t temp_wot_objects = {
-            .wot_thing_obj = objArray[7],
-            .wot_data_feature_obj = objArray[8],
-            .wot_action_obj = objArray[9],
-            .wot_event_obj = objArray[10]
+            .wot_thing_obj = lwm2m_obj_array[7],
+            .wot_data_feature_obj = lwm2m_obj_array[8],
+            .wot_action_obj = lwm2m_obj_array[9],
+            .wot_event_obj = lwm2m_obj_array[10]
         };
         
         wot_bootstrap_config_t* wot_config = wot_bootstrap_create_default_config();
@@ -379,12 +382,12 @@ static void client_task(void *pvParameters)
     }
     
     // Set up the callbacks for gateway object
-    gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
-    gateway_set_device_delete_callback(objArray[5], gateway_device_delete_callback);
-    gateway_set_registration_update_callback(objArray[5], lwm2m_trigger_registration_update);
+    gateway_set_device_update_callback(lwm2m_obj_array[5], gateway_device_update_callback);
+    // gateway_set_device_delete_callback(lwm2m_obj_array[5], gateway_device_delete_callback); // Not implemented yet
+    gateway_set_registration_update_callback(lwm2m_obj_array[5], lwm2m_trigger_registration_update);
 
-    device_add_instance(objArray[2], 0);
-    device_update_instance_string(objArray[2], 0, 2, serialNumber); // Set Power Source to Battery
+    device_add_instance(lwm2m_obj_array[2], 0);
+    device_update_instance_string(lwm2m_obj_array[2], 0, 2, serialNumber); // Set Power Source to Battery
 
     // Initialize Object 25 instances from device ring buffer
     uint32_t device_count = device_ring_buffer_get_count();
@@ -392,25 +395,25 @@ static void client_task(void *pvParameters)
         lwm2m_LwM2MDevice *device = device_ring_buffer_get_by_index(i);
         
         // Create Device Object instance (Object 3)
-        device_add_instance(objArray[2], device->instance_id);
+        device_add_instance(lwm2m_obj_array[2], device->instance_id);
         char serial_str[11]; // 10 digits + null terminator
         sprintf(serial_str, "%010lu", device->serial);
-        device_update_instance_string(objArray[2], device->instance_id, 2, serial_str); // Set Power Source to Battery
+        device_update_instance_string(lwm2m_obj_array[2], device->instance_id, 2, serial_str); // Set Power Source to Battery
 
         // Create Object 25 instance for each device
         // Use i as instanceId, device->serial as device_id, device->instance_id as server_instance_id
         // Assume BLE connection type since devices come through BLE
         //if (device->instance_id <= 0) {
-        gateway_add_instance(objArray[5], i, device->serial, CONNECTION_BLE);
+        gateway_add_instance(lwm2m_obj_array[5], i, device->serial, CONNECTION_BLE);
         // Set the server_instance_id (resource 1) to device->instance_id
-        gateway_update_instance_value(objArray[5], i, 1, device->instance_id);
+        gateway_update_instance_value(lwm2m_obj_array[5], i, 1, device->instance_id);
         //}
         ESP_LOGI(TAG, "Added Object 25 instance %d for device serial %lu (server_instance_id=%d)", 
                  i, device->serial, device->instance_id);
 
-        // Create Connectivity Monitoring (Object 4) instance for each device
-        if (objArray[6] != NULL) {
-            uint8_t conn_result = connectivity_moni_add_instance(objArray[6], device->instance_id, device->serial);
+                // Create Connectivity Monitoring (Object 4) instance for each device
+        if (lwm2m_obj_array[6] != NULL) {
+            uint8_t conn_result = connectivity_moni_add_instance(lwm2m_obj_array[6], device->instance_id, device->serial);
             if (conn_result == COAP_201_CREATED || conn_result == COAP_204_CHANGED) {
                 ESP_LOGI(TAG, "Added Object 4 (Connectivity Monitoring) instance %d for device serial %lu", 
                          device->instance_id, device->serial);
@@ -426,8 +429,8 @@ static void client_task(void *pvParameters)
     ESP_LOGI(TAG, "Object 25 initialized with %ld device instances", device_count);
     
     // Debug: Print all connectivity monitoring instances
-    if (objArray[6] != NULL) {
-        connectivity_moni_debug_instances(objArray[6]);
+    if (lwm2m_obj_array[6] != NULL) {
+        connectivity_moni_debug_instances(lwm2m_obj_array[6]);
     }
 
     client_data.sock = create_socket(LOCAL_PORT, client_data.addressFamily);
@@ -437,24 +440,24 @@ static void client_task(void *pvParameters)
     }
     int flags = lwip_fcntl(client_data.sock, F_GETFL, 0);
     lwip_fcntl(client_data.sock, F_SETFL, flags | O_NONBLOCK);
-    client_data.securityObjP = objArray[0];
+    client_data.securityObjP = lwm2m_obj_array[0];
     lwm2m_context_t *client_handle = lwm2m_init(&client_data);
     if (!client_handle) {
         ESP_LOGE(TAG, "Failed to initialize LwM2M client");
         vTaskDelete(NULL); return;
     }
     client_data.lwm2mH = client_handle;
-    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 11, objArray) != 0) {
+    if (lwm2m_configure(client_handle, serialNumber, NULL, NULL, 11, lwm2m_obj_array) != 0) {
         ESP_LOGE(TAG, "lwm2m_configure failed");
         vTaskDelete(NULL); return;
     }
     
     ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - WoT Objects configured:");
-    ESP_LOGI(TAG, "🔽   Object 4 (Connectivity Monitoring): %s", objArray[6] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26250 (WoT Thing): %s", objArray[7] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26251 (WoT Data Feature): %s", objArray[8] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26252 (WoT Action): %s", objArray[9] ? "✅ Registered" : "❌ Failed");
-    ESP_LOGI(TAG, "🔽   Object 26253 (WoT Event): %s", objArray[10] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 4 (Connectivity Monitoring): %s", lwm2m_obj_array[6] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26250 (WoT Thing): %s", lwm2m_obj_array[7] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26251 (WoT Data Feature): %s", lwm2m_obj_array[8] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26252 (WoT Action): %s", lwm2m_obj_array[9] ? "✅ Registered" : "❌ Failed");
+    ESP_LOGI(TAG, "🔽   Object 26253 (WoT Event): %s", lwm2m_obj_array[10] ? "✅ Registered" : "❌ Failed");
     ESP_LOGI(TAG, "🔽 BOOTSTRAP DEBUG - Client ready to receive bootstrap commands...");
     
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
@@ -486,7 +489,7 @@ static void client_task(void *pvParameters)
             }
             
             inactivity_counter++;
-            test_data_t *device_data = (test_data_t *)objArray[4]->userData;
+            test_data_t *device_data = (test_data_t *)lwm2m_obj_array[4]->userData;
             if (device_data->test_integer != (int)s_temperature_c) {
                 ESP_LOGI(TAG, "Temperature changed, updating resource to %.2f", s_temperature_c);
                 device_data->test_integer = (int)s_temperature_c;
@@ -549,7 +552,7 @@ void lwm2m_set_gateway_status(const char* status) {
 void lwm2m_update_connected_devices_count(void) {
     // Object 25 now represents individual devices, not gateway-level counts
     // Each device gets its own instance based on protobuf device data
-    if (objArray[5]) {
+    if (lwm2m_obj_array[5]) {
         uint32_t device_count = device_ring_buffer_get_count();
         ESP_LOGI(TAG, "Total devices in ring buffer: %ld", device_count);
         // TODO: Update/add/remove Object 25 instances when devices change
@@ -578,8 +581,8 @@ void lwm2m_trigger_registration_update(void) {
 }
 
 void lwm2m_update_device_rssi(uint16_t instance_id, int rssi) {
-    if (objArray[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
-        uint8_t result = connectivity_moni_update_rssi(objArray[6], instance_id, rssi);
+    if (lwm2m_obj_array[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
+        uint8_t result = connectivity_moni_update_rssi(lwm2m_obj_array[6], instance_id, rssi);
         if (result == COAP_204_CHANGED) {
             // Notify LwM2M framework that the RSSI value has changed to trigger observations
             lwm2m_uri_t uri;
@@ -598,8 +601,8 @@ void lwm2m_update_device_rssi(uint16_t instance_id, int rssi) {
 }
 
 void lwm2m_update_device_link_quality(uint16_t instance_id, int link_quality) {
-    if (objArray[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
-        uint8_t result = connectivity_moni_update_link_quality(objArray[6], instance_id, link_quality);
+    if (lwm2m_obj_array[6] && client_data.lwm2mH) {  // Connectivity Monitoring object and LwM2M context
+        uint8_t result = connectivity_moni_update_link_quality(lwm2m_obj_array[6], instance_id, link_quality);
         if (result == COAP_204_CHANGED) {
             // Notify LwM2M framework that the Link Quality value has changed to trigger observations
             lwm2m_uri_t uri;
@@ -630,12 +633,12 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
         device->instance_id = new_instance_id;
         
         // Update connectivity monitoring instance if needed
-        if (objArray[6] != NULL) {
+        if (lwm2m_obj_array[6] != NULL) {
             ESP_LOGI(TAG, "Updating connectivity monitoring: old_id=%u, new_id=%u", old_instance_id, new_instance_id);
             
             // Always try to remove old instance if it's different (and not 0 which is reserved for gateway)
             if (old_instance_id != new_instance_id && old_instance_id != 0) {
-                uint8_t remove_result = connectivity_moni_remove_instance(objArray[6], old_instance_id);
+                uint8_t remove_result = connectivity_moni_remove_instance(lwm2m_obj_array[6], old_instance_id);
                 if (remove_result == COAP_202_DELETED) {
                     ESP_LOGI(TAG, "Removed old connectivity monitoring instance %u", old_instance_id);
                 } else {
@@ -644,7 +647,7 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
             }
             
             // Add new connectivity monitoring instance with the correct instance_id
-            uint8_t add_result = connectivity_moni_add_instance(objArray[6], new_instance_id, device_id);
+            uint8_t add_result = connectivity_moni_add_instance(lwm2m_obj_array[6], new_instance_id, device_id);
             if (add_result == COAP_201_CREATED || add_result == COAP_204_CHANGED) {
                 ESP_LOGI(TAG, "Added/updated connectivity monitoring instance %u for device serial %u", new_instance_id, device_id);
                 
@@ -674,7 +677,7 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
             }
             
             // Debug: Print all connectivity monitoring instances after update
-            connectivity_moni_debug_instances(objArray[6]);
+            connectivity_moni_debug_instances(lwm2m_obj_array[6]);
         }
         
         // Save the updated device ring buffer to flash
@@ -700,8 +703,8 @@ static void gateway_device_delete_callback(uint32_t device_id, uint16_t instance
         ESP_LOGI(TAG, "Found device in ring buffer, removing device serial %u", device_id);
         
         // Remove corresponding connectivity monitoring instance if it exists
-        if (objArray[6] != NULL && instance_id != 0) { // Don't remove gateway instance (0)
-            uint8_t remove_result = connectivity_moni_remove_instance(objArray[6], instance_id);
+        if (lwm2m_obj_array[6] != NULL && instance_id != 0) { // Don't remove gateway instance (0)
+            uint8_t remove_result = connectivity_moni_remove_instance(lwm2m_obj_array[6], instance_id);
             if (remove_result == COAP_202_DELETED) {
                 ESP_LOGI(TAG, "Removed connectivity monitoring instance %u for deleted device", instance_id);
             } else {
@@ -709,7 +712,7 @@ static void gateway_device_delete_callback(uint32_t device_id, uint16_t instance
             }
             
             // Debug: Print all connectivity monitoring instances after removal
-            connectivity_moni_debug_instances(objArray[6]);
+            connectivity_moni_debug_instances(lwm2m_obj_array[6]);
         }
         
         // Remove the device from the ring buffer

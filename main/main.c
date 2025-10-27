@@ -42,7 +42,7 @@
 
 #include "liblwm2m.h"
 #include "lwm2mclient.h"
-extern lwm2m_object_t *objArray[6];
+extern lwm2m_object_t *lwm2m_obj_array[6];
 
 /* Conditional minimal crypto support for ChaCha20-Poly1305 */
 #if defined(CONFIG_MBEDTLS_CHACHA20_C) && defined(CONFIG_MBEDTLS_POLY1305_C)
@@ -142,7 +142,11 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
             lwm2m_LwM2MDevice *existing_device = device_ring_buffer_find_by_serial(message.serial);
             if (existing_device != NULL) {
                 ESP_LOGI(TAG, "Message from known device (serial: %ld), updating RSSI", message.serial);
-                lwm2m_update_device_rssi(existing_device->instance_id, (int)rssi);
+                if (lwm2m_obj_array[6] != NULL) { // Check connectivity monitoring object
+                    lwm2m_update_device_rssi(existing_device->instance_id, (int)rssi);
+                } else {
+                    ESP_LOGW(TAG, "Connectivity monitoring object not yet initialized, skipping RSSI update for known device");
+                }
             }
             
             // Check which message type was received
@@ -167,10 +171,12 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                 if (existing_device != NULL) {
                     ESP_LOGI(TAG, "Device already known (serial: %ld), updating RSSI and skipping verification", existing_device->serial);
                     
-                    // Update connectivity monitoring RSSI for existing device
+                // Update connectivity monitoring RSSI for existing device
+                if (lwm2m_obj_array[6] != NULL) { // Check connectivity monitoring object
                     lwm2m_update_device_rssi(existing_device->instance_id, (int)rssi);
-                    
-                    return;
+                } else {
+                    ESP_LOGW(TAG, "Connectivity monitoring object not yet initialized, skipping RSSI update for existing device");
+                }                    return;
                 }
                 if (message.body.device_challenge_answer.signature.size > 0) {
                     ESP_LOG_BUFFER_HEX_LEVEL(TAG, message.body.device_challenge_answer.signature.bytes, 
@@ -248,13 +254,67 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                                     } else {
                                         ESP_LOGI(TAG, "Factory signature verified successfully!");
                                         // when verified, add device to ring buffer or known devices
-                                        device_ring_buffer_add_device(
+                                        esp_err_t add_result = device_ring_buffer_add_device(
                                             message.body.device_challenge_answer.public_key.bytes,
                                             message.body.device_challenge_answer.public_key.size,
                                             message.model,
                                             message.serial,
                                             lwm2m_ConnectionType_CONNECTION_LORA
                                         );
+                                        
+                                        if (add_result == ESP_OK) {
+                                            // Find the newly added device to get its instance_id for monitoring
+                                            lwm2m_LwM2MDevice *new_device = device_ring_buffer_find_by_serial(message.serial);
+                                            if (new_device != NULL) {
+                                                ESP_LOGI(TAG, "Starting LwM2M monitoring for device (serial: %ld, instance_id: %d)", 
+                                                        message.serial, new_device->instance_id);
+                                                 uint32_t device_count = device_ring_buffer_get_count();
+                                                
+                                                // Check if gateway object is initialized before using it
+                                                if (lwm2m_obj_array[5] != NULL) {
+                                                    gateway_add_instance(lwm2m_obj_array[5], device_count - 1, new_device->serial, CONNECTION_LORA);
+                                                } else {
+                                                    ESP_LOGW(TAG, "Gateway object not yet initialized, skipping gateway_add_instance");
+                                                }
+                                                
+                                                // Initialize device monitoring with current RSSI
+                                                if (lwm2m_obj_array[6] != NULL) { // Check connectivity monitoring object too
+                                                    lwm2m_update_device_rssi(new_device->instance_id, (int)rssi);
+                                                } else {
+                                                    ESP_LOGW(TAG, "Connectivity monitoring object not yet initialized, skipping RSSI update");
+                                                }
+                                                
+                                                // Calculate and update link quality based on RSSI
+                                                int link_quality = 0;
+                                                if (rssi > -80) {
+                                                    link_quality = 4; // Excellent
+                                                } else if (rssi > -100) {
+                                                    link_quality = 3; // Good
+                                                } else if (rssi > -120) {
+                                                    link_quality = 2; // Fair
+                                                } else {
+                                                    link_quality = 1; // Poor
+                                                }
+                                                
+                                                if (lwm2m_obj_array[6] != NULL) { // Check connectivity monitoring object
+                                                    lwm2m_update_device_link_quality(new_device->instance_id, link_quality);
+                                                } else {
+                                                    ESP_LOGW(TAG, "Connectivity monitoring object not yet initialized, skipping link quality update");
+                                                }
+                                                
+                                                // Update gateway statistics for new device
+                                                ESP_LOGI(TAG, "Updating gateway statistics for new device");
+                                                lwm2m_update_connected_devices_count();
+                                                lwm2m_trigger_registration_update();
+                                                
+                                                ESP_LOGI(TAG, "Device monitoring initialized - RSSI: %.2f dBm, Link Quality: %d", 
+                                                        rssi, link_quality);
+                                            } else {
+                                                ESP_LOGW(TAG, "Could not find newly added device for monitoring setup");
+                                            }
+                                        } else {
+                                            ESP_LOGE(TAG, "Failed to add device to ring buffer: %s", esp_err_to_name(add_result));
+                                        }
                                     }
                                 }
                             }
@@ -335,7 +395,7 @@ void app_main(void)
     temp_sensor_config_t temp_sensor = TSENS_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(temp_sensor_set_config(temp_sensor));
     ESP_ERROR_CHECK(temp_sensor_start());
-    objArray[2] = get_object_device();
+    lwm2m_obj_array[2] = get_object_device();
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -357,6 +417,9 @@ void app_main(void)
 
     /* Start LwM2M client task (moved to lwm2m_client.c) */
     lwm2m_client_start();
+    
+    /* Wait a bit for LwM2M client to initialize lwm2m_obj_array */
+    vTaskDelay(pdMS_TO_TICKS(2000)); // 2 second delay
     
     /* Test ECDH with real key generation (using CORRECTED implementation) */
     test_ecdh_crypto_with_keygen();

@@ -11,7 +11,11 @@
 #include "liblwm2m.h"
 #include "lwm2mclient.h"
 #include "object_gateway.h"
-extern lwm2m_object_t *objArray[6];
+extern lwm2m_object_t *lwm2m_obj_array[6];
+
+// Forward declaration for missing gateway function
+uint8_t gateway_update_instance_value(lwm2m_object_t * objectP, uint16_t instanceId, uint16_t resourceId, int64_t value);
+
 static const char *TAG = "DEVICE_RING_BUFFER";
 
 /* Global ring buffer instance */
@@ -83,16 +87,15 @@ esp_err_t device_ring_buffer_add(const lwm2m_LwM2MDevice *device)
         ESP_LOGI(TAG, "Device data saved to flash");
     }
 
-    device_add_instance(objArray[2], g_device_buffer.count-1);
-
+    device_add_instance(lwm2m_obj_array[2], g_device_buffer.count-1);
+    
     char serial_str[11]; // 10 digits + null terminator
     sprintf(serial_str, "%010lu", device->serial);
-    device_update_instance_string(objArray[2], g_device_buffer.count - 1, 2, serial_str); // Set Power Source to Battery
+    device_update_instance_string(lwm2m_obj_array[2], g_device_buffer.count - 1, 2, serial_str); // Set Power Source to Battery
     
-    // Update gateway connected devices count
-    if (objArray[5]) {
-        gateway_update_instance_value(objArray[5], 0, 1, g_device_buffer.count);
-        ESP_LOGI(TAG, "Updated gateway connected devices count to %ld", g_device_buffer.count);
+    // Update gateway object instance count (resource 1)
+    if (lwm2m_obj_array[5]) {
+        gateway_update_instance_value(lwm2m_obj_array[5], 0, 1, g_device_buffer.count);
     }
     
     return ESP_OK;
@@ -170,6 +173,8 @@ esp_err_t device_ring_buffer_remove_by_serial(uint32_t serial)
     // Find the device
     for (uint32_t i = 0; i < g_device_buffer.count; i++) {
         if (g_device_buffer.devices[i].serial == serial) {
+            ESP_LOGI(TAG, "Found device with serial %ld at index %ld, removing...", serial, i);
+            
             // Shift all devices after this one forward
             for (uint32_t j = i; j < g_device_buffer.count - 1; j++) {
                 memcpy(&g_device_buffer.devices[j], &g_device_buffer.devices[j + 1], 
@@ -180,18 +185,23 @@ esp_err_t device_ring_buffer_remove_by_serial(uint32_t serial)
             memset(&g_device_buffer.devices[g_device_buffer.count - 1], 0, sizeof(lwm2m_LwM2MDevice));
             g_device_buffer.count--;
             
-            // Adjust head pointer if necessary
+            // Fix head pointer: Only adjust if removal affects the circular head position
+            // Since we shift elements forward, if head was pointing beyond the removed element,
+            // we need to adjust it back by one position
             if (g_device_buffer.head > 0) {
                 g_device_buffer.head--;
+            } else if (g_device_buffer.count > 0) {
+                g_device_buffer.head = g_device_buffer.count; // Point to next available slot
             } else {
-                g_device_buffer.head = g_device_buffer.capacity - 1;
+                g_device_buffer.head = 0; // Buffer is empty
             }
 
-            ESP_LOGI(TAG, "Removed device with serial %ld (count: %ld)", serial, g_device_buffer.count);
+            ESP_LOGI(TAG, "Removed device with serial %ld (count: %ld, head: %ld)", 
+                     serial, g_device_buffer.count, g_device_buffer.head);
             
             // Update gateway connected devices count
-            if (objArray[5]) {
-                gateway_update_instance_value(objArray[5], 0, 1, g_device_buffer.count);
+            if (lwm2m_obj_array[5]) {
+                gateway_update_instance_value(lwm2m_obj_array[5], 0, 1, g_device_buffer.count);
                 ESP_LOGI(TAG, "Updated gateway connected devices count to %ld", g_device_buffer.count);
             }
             
@@ -346,11 +356,11 @@ esp_err_t device_ring_buffer_clear_flash(void)
 }
 
 /* Sync gateway statistics with current device count */
-void device_ring_buffer_sync_gateway_stats(void)
+void device_ring_buffer_sync_lwm2m_count(void)
 {
-    if (objArray[5]) {
+    if (lwm2m_obj_array[5]) {
         uint32_t device_count = device_ring_buffer_get_count();
-        gateway_update_instance_value(objArray[5], 0, 1, device_count);
+        gateway_update_instance_value(lwm2m_obj_array[5], 0, 1, device_count);
         ESP_LOGI(TAG, "Synced gateway device count: %ld", device_count);
     }
 }
