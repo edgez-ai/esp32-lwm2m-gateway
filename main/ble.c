@@ -553,6 +553,7 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     new_device.serial = pending->serial;
     new_device.instance_id = 0;  // Will be assigned during bootstrap
     new_device.banned = false;
+    new_device.connection_type = lwm2m_ConnectionType_CONNECTION_BLE; // Set BLE connection type using protobuf enum
     
     // TODO: Properly implement MAC address storage (requires pb_callback implementation)
     // For now, we store the MAC address information in the pending challenge structure

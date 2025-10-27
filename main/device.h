@@ -81,7 +81,7 @@ bool device_ring_buffer_is_device_known(const uint8_t *public_key, size_t public
 lwm2m_LwM2MDevice* device_ring_buffer_find_by_public_key(const uint8_t *public_key, size_t public_key_len);
 
 /* Add a device with public key, model, and serial number */
-esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial);
+esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial, lwm2m_ConnectionType connection_type);
 
 #ifdef __cplusplus
 }

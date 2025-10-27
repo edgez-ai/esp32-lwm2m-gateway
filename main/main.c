@@ -252,7 +252,8 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
                                             message.body.device_challenge_answer.public_key.bytes,
                                             message.body.device_challenge_answer.public_key.size,
                                             message.model,
-                                            message.serial
+                                            message.serial,
+                                            lwm2m_ConnectionType_CONNECTION_LORA
                                         );
                                     }
                                 }

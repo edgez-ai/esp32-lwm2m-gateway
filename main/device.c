@@ -415,7 +415,7 @@ lwm2m_LwM2MDevice* device_ring_buffer_find_by_public_key(const uint8_t *public_k
 }
 
 /* Add a device with public key, model, and serial number */
-esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial)
+esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public_key_len, uint32_t model, uint32_t serial, lwm2m_ConnectionType connection_type)
 {
     if (!g_initialized) {
         ESP_LOGE(TAG, "Device ring buffer not initialized");
@@ -447,13 +447,14 @@ esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public
     new_device.serial = serial;
     new_device.instance_id = g_device_buffer.count; // Use current count as instance ID
     new_device.banned = false;
+    new_device.connection_type = connection_type; // Use protobuf enum directly
     
     // Copy public key
     memcpy(new_device.public_key.bytes, public_key, public_key_len);
     new_device.public_key.size = public_key_len;
 
-    ESP_LOGI(TAG, "Adding device - Model: %ld, Serial: %ld, Public key size: %d", 
-             model, serial, (int)public_key_len);
+    ESP_LOGI(TAG, "Adding device - Model: %ld, Serial: %ld, Public key size: %d, Connection type: %d", 
+             model, serial, (int)public_key_len, (int)connection_type);
 
     // Add the device to the ring buffer
     return device_ring_buffer_add(&new_device);
