@@ -383,7 +383,7 @@ static void client_task(void *pvParameters)
     
     // Set up the callbacks for gateway object
     gateway_set_device_update_callback(lwm2m_obj_array[5], gateway_device_update_callback);
-    // gateway_set_device_delete_callback(lwm2m_obj_array[5], gateway_device_delete_callback); // Not implemented yet
+    gateway_set_device_delete_callback(lwm2m_obj_array[5], gateway_device_delete_callback);
     gateway_set_registration_update_callback(lwm2m_obj_array[5], lwm2m_trigger_registration_update);
 
     device_add_instance(lwm2m_obj_array[2], 0);
