@@ -3,6 +3,8 @@
 
 #include "esp_err.h"
 
+#ifdef CONFIG_ENABLE_LORA
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,5 +85,7 @@ void lora_stop_task(void);
 #ifdef __cplusplus
 }
 #endif
+
+#endif // CONFIG_ENABLE_LORA
 
 #endif // LORA_H

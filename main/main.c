@@ -27,7 +27,9 @@
 /* BLE logic moved to ble.c/ble.h */
 #include "ble.h"
 /* LoRa logic moved to lora.cpp/lora.h */
+#ifdef CONFIG_ENABLE_LORA
 #include "lora.h"
+#endif
 #include <pb_decode.h>
 #include <pb_encode.h>
  #include "lwip/err.h"
@@ -106,6 +108,7 @@ void ble_get_challenge_message(const uint8_t **buf, size_t *len) {
 }
 
 // Proper implementation for lora_send_message_bin using the new binary LoRa function
+#ifdef CONFIG_ENABLE_LORA
 void lora_send_message_bin(const uint8_t *data, size_t len) {
     ESP_LOGI(TAG, "lora_send_message_bin called with %d bytes", (int)len);
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
@@ -116,8 +119,10 @@ void lora_send_message_bin(const uint8_t *data, size_t len) {
         ESP_LOGE(TAG, "Failed to send binary data via LoRa: %s", esp_err_to_name(ret));
     }
 }
+#endif // CONFIG_ENABLE_LORA
 
 
+#ifdef CONFIG_ENABLE_LORA
 /* LoRa receive callback function */
 void lora_message_received(const uint8_t* data, size_t length, float rssi, float snr) {
     ESP_LOGI(TAG, "🎯 LoRa message callback triggered!");
@@ -368,8 +373,10 @@ void lora_message_received(const uint8_t* data, size_t length, float rssi, float
         ESP_LOGI(TAG, "   Signal quality: Poor");
     }
 }
+#endif // CONFIG_ENABLE_LORA
 
 
+#ifdef CONFIG_ENABLE_LORA
 // Periodically send BLE challenge protobuf message over LoRa
 void lora_challenge_task(void *pvParameters) {
     while (1) {
@@ -384,9 +391,10 @@ void lora_challenge_task(void *pvParameters) {
         } else {
             ESP_LOGW(TAG, "No challenge message available from BLE");
         }
-        vTaskDelay(pdMS_TO_TICKS(15000)); // 15 seconds
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_LORA_CHALLENGE_INTERVAL * 1000));
     }
 }
+#endif // CONFIG_ENABLE_LORA
 
 
 void app_main(void)
@@ -430,7 +438,9 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
     }
 
+#ifdef CONFIG_ENABLE_LORA
     /* Initialize and start LoRa module with listen-before-send pattern */
+    ESP_LOGI(TAG, "LoRa is enabled in configuration, initializing...");
     esp_err_t lora_ret = lora_init();
     if (lora_ret != ESP_OK) {
         ESP_LOGE(TAG, "LoRa init failed: %s", esp_err_to_name(lora_ret));
@@ -441,10 +451,17 @@ void app_main(void)
         } else {
             ESP_LOGI(TAG, "LoRa module initialized and task started successfully");
             ESP_LOGI(TAG, "🎯 LoRa is now listening with callback support");
+            ESP_LOGI(TAG, "   Frequency: %d Hz", CONFIG_LORA_FREQUENCY);
+            ESP_LOGI(TAG, "   TX Power: %d dBm", CONFIG_LORA_TX_POWER);
+            ESP_LOGI(TAG, "   Spreading Factor: %d", CONFIG_LORA_SPREADING_FACTOR);
+            ESP_LOGI(TAG, "   Challenge Interval: %d seconds", CONFIG_LORA_CHALLENGE_INTERVAL);
 
             // Start periodic LoRa challenge message task
             xTaskCreate(lora_challenge_task, "lora_challenge_task", 4096, NULL, 5, NULL);
         }
     }
+#else
+    ESP_LOGI(TAG, "LoRa is disabled in configuration, skipping LoRa initialization");
+#endif // CONFIG_ENABLE_LORA
 }
 

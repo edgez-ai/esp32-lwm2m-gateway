@@ -13,3 +13,75 @@ menu "Example 'PERIODIC SYNCHRONIZATION' Config"
             This config the pipeline id for CI test. Only for internal used.
 
 endmenu
+
+menu "LwM2M Gateway Configuration"
+
+    config ENABLE_LORA
+        bool "Enable LoRa functionality"
+        default y
+        help
+            Enable or disable LoRa radio functionality in the gateway.
+            When disabled, the gateway will only use BLE for device communication.
+
+    config LORA_FREQUENCY
+        int "LoRa frequency in Hz"
+        depends on ENABLE_LORA
+        default 915000000
+        range 863000000 928000000
+        help
+            Set the LoRa radio frequency. Common frequencies:
+            - 433 MHz: 433000000
+            - 868 MHz: 868000000 (Europe)
+            - 915 MHz: 915000000 (North America)
+
+    config LORA_TX_POWER
+        int "LoRa transmit power in dBm"
+        depends on ENABLE_LORA
+        default 14
+        range 2 20
+        help
+            Set the LoRa transmit power level in dBm.
+            Higher values increase range but consume more power.
+
+    config LORA_SPREADING_FACTOR
+        int "LoRa spreading factor"
+        depends on ENABLE_LORA
+        default 7
+        range 6 12
+        help
+            LoRa spreading factor affects range vs data rate:
+            - SF6: Fastest data rate, shortest range
+            - SF12: Slowest data rate, longest range
+
+    config LORA_BANDWIDTH
+        int "LoRa bandwidth in Hz"
+        depends on ENABLE_LORA
+        default 125000
+        help
+            LoRa signal bandwidth. Common values:
+            - 125000 (125 kHz)
+            - 250000 (250 kHz)
+            - 500000 (500 kHz)
+
+    config LORA_CODING_RATE
+        int "LoRa coding rate"
+        depends on ENABLE_LORA
+        default 5
+        range 5 8
+        help
+            LoRa coding rate for error correction:
+            - 5: 4/5 coding rate
+            - 6: 4/6 coding rate  
+            - 7: 4/7 coding rate
+            - 8: 4/8 coding rate
+
+    config LORA_CHALLENGE_INTERVAL
+        int "LoRa challenge message interval in seconds"
+        depends on ENABLE_LORA
+        default 15
+        range 5 300
+        help
+            Interval between sending challenge messages over LoRa.
+            Shorter intervals increase device discovery speed but use more power.
+
+endmenu
