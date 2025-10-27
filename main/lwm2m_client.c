@@ -52,6 +52,7 @@ static bool wot_model_printed = false;  // Flag to print WoT model only once
 
 // Forward declaration of callback function
 static void gateway_device_update_callback(uint32_t device_id, uint16_t new_instance_id);
+static void gateway_device_delete_callback(uint32_t device_id, uint16_t instance_id);
 
 // Function to print WoT Things model
 static void print_wot_things_model(void)
@@ -379,6 +380,7 @@ static void client_task(void *pvParameters)
     
     // Set up the callbacks for gateway object
     gateway_set_device_update_callback(objArray[5], gateway_device_update_callback);
+    gateway_set_device_delete_callback(objArray[5], gateway_device_delete_callback);
     gateway_set_registration_update_callback(objArray[5], lwm2m_trigger_registration_update);
 
     device_add_instance(objArray[2], 0);
@@ -684,5 +686,52 @@ static void gateway_device_update_callback(uint32_t device_id, uint16_t new_inst
         }
     } else {
         ESP_LOGW(TAG, "Warning: Device with serial %u not found in ring buffer", device_id);
+    }
+}
+
+// Callback function for gateway object to delete device
+static void gateway_device_delete_callback(uint32_t device_id, uint16_t instance_id)
+{
+    ESP_LOGI(TAG, "Gateway delete callback: Removing device %u with instance_id %u", device_id, instance_id);
+    
+    // Find the corresponding device in ring buffer using device_id (serial)
+    lwm2m_LwM2MDevice *device = device_ring_buffer_find_by_serial(device_id);
+    if (device != NULL) {
+        ESP_LOGI(TAG, "Found device in ring buffer, removing device serial %u", device_id);
+        
+        // Remove corresponding connectivity monitoring instance if it exists
+        if (objArray[6] != NULL && instance_id != 0) { // Don't remove gateway instance (0)
+            uint8_t remove_result = connectivity_moni_remove_instance(objArray[6], instance_id);
+            if (remove_result == COAP_202_DELETED) {
+                ESP_LOGI(TAG, "Removed connectivity monitoring instance %u for deleted device", instance_id);
+            } else {
+                ESP_LOGW(TAG, "Failed to remove connectivity monitoring instance %u (result: %u)", instance_id, remove_result);
+            }
+            
+            // Debug: Print all connectivity monitoring instances after removal
+            connectivity_moni_debug_instances(objArray[6]);
+        }
+        
+        // Remove the device from the ring buffer
+        esp_err_t remove_err = device_ring_buffer_remove_by_serial(device_id);
+        if (remove_err == ESP_OK) {
+            ESP_LOGI(TAG, "Device serial %u successfully removed from ring buffer", device_id);
+            
+            // Save the updated device ring buffer to flash
+            esp_err_t save_err = device_ring_buffer_save_to_flash();
+            if (save_err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to save device ring buffer after deletion: %s", esp_err_to_name(save_err));
+            } else {
+                ESP_LOGI(TAG, "Device ring buffer updated and saved after deleting device serial %u", device_id);
+            }
+        } else {
+            ESP_LOGW(TAG, "Failed to remove device serial %u from ring buffer: %s", device_id, esp_err_to_name(remove_err));
+        }
+        
+        // Trigger registration update to notify server of changes
+        lwm2m_trigger_registration_update();
+        
+    } else {
+        ESP_LOGW(TAG, "Warning: Device with serial %u not found in ring buffer for deletion", device_id);
     }
 }
