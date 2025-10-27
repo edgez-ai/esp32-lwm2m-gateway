@@ -28,6 +28,9 @@
 // Forward declaration for missing gateway function
 uint8_t gateway_update_instance_value(lwm2m_object_t * objectP, uint16_t instanceId, uint16_t resourceId, int64_t value);
 
+// Forward declaration for device object functions
+uint8_t device_remove_instance(lwm2m_object_t * objectP, uint16_t instanceId);
+
 /* Keep RTC persisted data across deep sleep resets */
 RTC_DATA_ATTR char rtc_lwm2m_server_uri[128] = {0};
 RTC_DATA_ATTR char rtc_lwm2m_identity[64] = {0};
@@ -700,15 +703,27 @@ static void gateway_device_delete_callback(uint32_t device_id, uint16_t instance
     // Find the corresponding device in ring buffer using device_id (serial)
     lwm2m_LwM2MDevice *device = device_ring_buffer_find_by_serial(device_id);
     if (device != NULL) {
-        ESP_LOGI(TAG, "Found device in ring buffer, removing device serial %u", device_id);
+        uint16_t device_instance_id = device->instance_id;
+        ESP_LOGI(TAG, "Found device in ring buffer, removing device serial %u (device instance_id: %u)", 
+                 device_id, device_instance_id);
         
-        // Remove corresponding connectivity monitoring instance if it exists
-        if (lwm2m_obj_array[6] != NULL && instance_id != 0) { // Don't remove gateway instance (0)
-            uint8_t remove_result = connectivity_moni_remove_instance(lwm2m_obj_array[6], instance_id);
-            if (remove_result == COAP_202_DELETED) {
-                ESP_LOGI(TAG, "Removed connectivity monitoring instance %u for deleted device", instance_id);
+        // Remove corresponding Device Object (Object 3) instance if it exists and is not instance 0 (gateway)
+        if (lwm2m_obj_array[2] != NULL && device_instance_id != 0) {
+            uint8_t device_remove_result = device_remove_instance(lwm2m_obj_array[2], device_instance_id);
+            if (device_remove_result == COAP_202_DELETED) {
+                ESP_LOGI(TAG, "Removed Device Object (Object 3) instance %u for deleted device", device_instance_id);
             } else {
-                ESP_LOGW(TAG, "Failed to remove connectivity monitoring instance %u (result: %u)", instance_id, remove_result);
+                ESP_LOGW(TAG, "Failed to remove Device Object instance %u (result: %u)", device_instance_id, device_remove_result);
+            }
+        }
+        
+        // Remove corresponding Connectivity Monitoring (Object 4) instance if it exists and is not instance 0 (gateway)
+        if (lwm2m_obj_array[6] != NULL && device_instance_id != 0) {
+            uint8_t conn_remove_result = connectivity_moni_remove_instance(lwm2m_obj_array[6], device_instance_id);
+            if (conn_remove_result == COAP_202_DELETED) {
+                ESP_LOGI(TAG, "Removed Connectivity Monitoring (Object 4) instance %u for deleted device", device_instance_id);
+            } else {
+                ESP_LOGW(TAG, "Failed to remove Connectivity Monitoring instance %u (result: %u)", device_instance_id, conn_remove_result);
             }
             
             // Debug: Print all connectivity monitoring instances after removal

@@ -65,6 +65,13 @@ esp_err_t device_ring_buffer_add(const lwm2m_LwM2MDevice *device)
 
     // Add new device at head position
     memcpy(&g_device_buffer.devices[g_device_buffer.head], device, sizeof(lwm2m_LwM2MDevice));
+    
+    // Assign correct instance_id for new devices (avoid 0 which is reserved for gateway)
+    if (g_device_buffer.devices[g_device_buffer.head].instance_id == 0) {
+        g_device_buffer.devices[g_device_buffer.head].instance_id = g_device_buffer.count + 1;
+        ESP_LOGI(TAG, "Assigned instance_id %u to new device with serial %ld", 
+                 g_device_buffer.devices[g_device_buffer.head].instance_id, device->serial);
+    }
 
     // Advance head pointer (circular)
     g_device_buffer.head = (g_device_buffer.head + 1) % g_device_buffer.capacity;
@@ -455,7 +462,7 @@ esp_err_t device_ring_buffer_add_device(const uint8_t *public_key, size_t public
     
     new_device.model = model;
     new_device.serial = serial;
-    new_device.instance_id = g_device_buffer.count; // Use current count as instance ID
+    new_device.instance_id = 0; // Use current count + 1 as instance ID (avoid 0 which is reserved for gateway)
     new_device.banned = false;
     new_device.connection_type = connection_type; // Use protobuf enum directly
     

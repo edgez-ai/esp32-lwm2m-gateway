@@ -551,7 +551,7 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
     lwm2m_LwM2MDevice new_device = {0};
     new_device.model = pending->model;
     new_device.serial = pending->serial;
-    new_device.instance_id = 0;  // Will be assigned during bootstrap
+    new_device.instance_id = 0;  // Will be assigned properly by device_ring_buffer_add_device
     new_device.banned = false;
     new_device.connection_type = lwm2m_ConnectionType_CONNECTION_BLE; // Set BLE connection type using protobuf enum
     
@@ -572,16 +572,20 @@ static bool process_challenge_answer(const uint8_t *data, size_t data_len, uint3
         ESP_LOGI(LOG_TAG, "Successfully added challenged device with serial %ld to device list", sender_serial);
         remove_pending_challenge(sender_serial);
         
+        // Get the device back from ring buffer to get the assigned instance_id
+        lwm2m_LwM2MDevice *added_device = device_ring_buffer_find_by_serial(new_device.serial);
+        uint16_t device_instance_id = added_device ? added_device->instance_id : (device_ring_buffer_get_count());
+        
         // If LwM2M client is initialized, add the gateway instance and notify server
         if (lwm2m_obj_array[5] != NULL) {
             uint32_t device_count = device_ring_buffer_get_count();
             gateway_add_instance(lwm2m_obj_array[5], device_count - 1, new_device.serial, CONNECTION_BLE);
             
-            // Add connectivity monitoring instance for the new device (using instance_id when available)
+            // Add connectivity monitoring instance for the new device using correct instance_id
             if (lwm2m_obj_array[6] != NULL) {
-                // For new devices, instance_id is 0 initially, so use device_count-1 as temporary instance_id
-                connectivity_moni_add_instance(lwm2m_obj_array[6], device_count - 1, new_device.serial);
-                ESP_LOGI(LOG_TAG, "Added connectivity monitoring instance for new device serial %ld", new_device.serial);
+                connectivity_moni_add_instance(lwm2m_obj_array[6], device_instance_id, new_device.serial);
+                ESP_LOGI(LOG_TAG, "Added connectivity monitoring instance %u for new device serial %ld", 
+                         device_instance_id, new_device.serial);
             }
             
             // Trigger registration update to notify LwM2M server about the new device
